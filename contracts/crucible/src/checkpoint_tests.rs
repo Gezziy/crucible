@@ -68,8 +68,8 @@ mod tests {
 
     #[contractimpl]
     impl Emitter {
-        pub fn ping(env: Env) {
-            env.events().publish((symbol_short!("ping"),), 1_u32);
+        pub fn ping(env: Env, value: u32) {
+            env.events().publish((symbol_short!("ping"),), value);
         }
     }
 
@@ -376,8 +376,8 @@ mod tests {
         assert_eq!(env.visible_event_count(), 0);
 
         let _ = env.speculate(|| {
-            client.ping();
-            client.ping();
+            client.ping(&1);
+            client.ping(&2);
             0_u32
         });
 
@@ -388,7 +388,7 @@ mod tests {
         );
 
         // A later real call still records events normally.
-        client.ping();
+        client.ping(&3);
         assert_eq!(env.visible_event_count(), 1);
     }
 

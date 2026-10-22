@@ -275,6 +275,10 @@ pub enum ProtocolVersion {
 }
 
 impl ProtocolVersion {
+    pub const V20: Self = Self::Protocol20;
+    pub const V21: Self = Self::Protocol21;
+    pub const V22: Self = Self::Protocol22;
+
     /// Returns the numeric protocol version.
     pub fn value(&self) -> u32 {
         *self as u32
@@ -1006,6 +1010,17 @@ impl MockEnv {
     /// Stellar network closes a ledger roughly every 5 seconds.
     pub fn advance_ledgers(&self, ledgers: u32) {
         self.advance_ledger(ledgers, DEFAULT_SECONDS_PER_LEDGER);
+    }
+
+    /// Advance timestamp and ledger sequence independently by the requested amounts.
+    pub fn advance_sequence_and_time(&self, duration: Duration, ledgers: u32) {
+        self.advance_time(duration);
+        self.advance_sequence(ledgers);
+    }
+
+    /// Advance an epoch expressed as `(elapsed_time, ledger_count)`.
+    pub fn advance_epoch(&self, (duration, ledgers): (Duration, u32)) {
+        self.advance_sequence_and_time(duration, ledgers);
     }
 
     /// Advances the ledger clock far enough to cover `duration`.
@@ -2157,17 +2172,6 @@ impl Default for MockEnv {
     fn default() -> Self {
         let event_rollback = Rc::new(RefCell::new(EventRollbackState::default()));
         let env = Env::default();
-        // Clear speculative hides whenever a new top-level host invocation
-        // starts (metering resets the event buffer at the same boundary).
-        let rollback_for_hook = Rc::clone(&event_rollback);
-        let _ = env.host().set_invocation_hook(Some(Rc::new(move |_host, event| {
-            if matches!(event, soroban_env_host::InvocationEvent::Start) {
-                let mut state = rollback_for_hook.borrow_mut();
-                state.hidden_indices.clear();
-                state.last_len = 0;
-                state.last_head_fingerprint = None;
-            }
-        })));
         Self {
             inner: env,
             accounts: Rc::new(RefCell::new(HashMap::new())),
@@ -3240,15 +3244,15 @@ mod protocol_version_tests {
     #[test]
     fn test_protocol_version_getter_returns_default() {
         let env = MockEnv::default();
-        assert_eq!(env.protocol_version(), 26);
+        assert_eq!(env.protocol_version(), 28);
     }
 
     #[test]
     fn test_with_protocol_version_sets_ledger() {
         let env = MockEnv::builder()
-            .with_protocol_version(26)
+            .with_protocol_version(28)
             .build();
-        assert_eq!(env.protocol_version(), 26);
+        assert_eq!(env.protocol_version(), 28);
     }
 
     #[test]

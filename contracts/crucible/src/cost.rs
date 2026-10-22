@@ -1,7 +1,7 @@
 //! Helpers for measuring and reporting contract execution costs.
-//! SDK 26: soroban_env_host is not a public dependency; FeeEstimate is defined locally.
+//! Cost reports for measured Soroban contract calls.
 
-/// Fee breakdown returned by the Soroban host (SDK 26 compatible).
+/// Fee breakdown returned by the Soroban host.
 /// Mirrors the fields previously exposed by `soroban_env_host::FeeEstimate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeeEstimate {
@@ -21,11 +21,7 @@ pub struct CostReport {
     instructions: u64,
     memory: u64,
     fee_stroops: Option<i128>,
-    #[cfg(feature = "std")]
-    report_cache: std::sync::OnceLock<String>,
 }
-
-use std::fmt;
 
 impl std::fmt::Display for CostReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -50,11 +46,32 @@ impl std::fmt::Display for CostReport {
 
 impl CostReport {
     pub fn new(instructions: u64, memory: u64) -> Self {
-        Self { instructions, memory }
+        Self {
+            instructions,
+            memory,
+            fee_stroops: None,
+        }
     }
+
+    pub fn new_with_fee_estimate(instructions: u64, memory: u64, fee_stroops: i128) -> Self {
+        Self {
+            instructions,
+            memory,
+            fee_stroops: Some(fee_stroops),
+        }
+    }
+
+    pub fn uses_sdk_fee_estimate(&self) -> bool {
+        self.fee_stroops.is_some()
+    }
+
     pub fn instructions(&self) -> u64 { self.instructions }
     pub fn memory_bytes(&self) -> u64 { self.memory }
-    pub fn fee_stroops(&self) -> i64 { crate::sim::BudgetProfile::current().instruction_fee(self.instructions) }
+    pub fn fee_stroops(&self) -> i64 {
+        self.fee_stroops
+            .map(|fee| i64::try_from(fee).unwrap_or(i64::MAX))
+            .unwrap_or_else(|| crate::sim::BudgetProfile::current().instruction_fee(self.instructions))
+    }
     pub fn report(&self) -> String {
         format!("Instructions: {}\nMemory: {} bytes\nFee: {} stroops",
             format_with_commas(self.instructions),

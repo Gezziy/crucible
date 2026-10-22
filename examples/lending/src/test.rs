@@ -174,7 +174,8 @@ fn test_liquidate_unhealthy_position_repays_debt_and_seizes_bonus_collateral() {
         .liquidate(&ctx.lender, &ctx.borrower, &100_000_i128);
 
     let position = ctx.client().position(&ctx.borrower);
-    assert_eq!(position.borrowed, debt_before - 100_000);
+    // Scaled debt conversion rounds down by at most one unit after liquidation.
+    assert!((debt_before - 100_001..=debt_before - 100_000).contains(&position.borrowed));
     assert_eq!(position.collateral, 895_000);
     assert_eq!(ctx.collateral.balance(&ctx.lender), 105_000);
     assert_eq!(ctx.client().reserve().total_borrowed, debt_before - 100_000);
