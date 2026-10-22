@@ -36,6 +36,7 @@ use hmac::{Hmac, Mac};
 use redis::AsyncCommands;
 use serde::Deserialize;
 use sha2::Sha256;
+use sqlx::PgPool;
 use tracing::{debug, warn};
 
 use super::permissions::{AuthUser, Role};
@@ -101,6 +102,8 @@ pub struct AdminAuthState {
     /// Redis client used for `jti` blocklist lookups. When unset, JWT
     /// revocation checks are skipped (signature/expiry are still enforced).
     redis: Option<redis::Client>,
+    /// Database used as the durable source of truth for account status and role.
+    db: Option<PgPool>,
 }
 
 impl AdminAuthState {
@@ -112,6 +115,12 @@ impl AdminAuthState {
     /// Attach a Redis client used for JWT `jti` revocation checks.
     pub fn with_redis(mut self, redis: redis::Client) -> Self {
         self.redis = Some(redis);
+        self
+    }
+
+    /// Attach the database used to enforce current account status and role.
+    pub fn with_db(mut self, db: PgPool) -> Self {
+        self.db = Some(db);
         self
     }
 
@@ -138,7 +147,8 @@ impl AdminAuthState {
 
         match std::env::var("ADMIN_API_TOKEN") {
             Ok(token) if !token.trim().is_empty() => {
-                state.insert_token(token, Principal::admin(1, "admin"));
+                // Registry credentials are service credentials, not user accounts.
+                state.insert_token(token, Principal::admin(-1, "admin-service"));
             }
             _ => {
                 warn!(
@@ -153,8 +163,8 @@ impl AdminAuthState {
                 state.insert_token(
                     token,
                     Principal {
-                        id: 2,
-                        address: "operator".to_string(),
+                        id: -2,
+                        address: "operator-service".to_string(),
                         role: Role::User,
                     },
                 );
@@ -194,7 +204,13 @@ impl AdminAuthState {
         };
         let key = format!("{TOKEN_BLOCKLIST_PREFIX}{jti}");
         match redis.get_multiplexed_async_connection().await {
-            Ok(mut conn) => conn.exists::<_, bool>(key).await.unwrap_or(false),
+            Ok(mut conn) => match conn.exists::<_, bool>(key).await {
+                Ok(exists) => exists,
+                Err(err) => {
+                    warn!(error = %err, "JWT revocation lookup failed; denying request");
+                    true
+                }
+            },
             Err(err) => {
                 // Fail closed when Redis is configured but unreachable: a
                 // revoked token must not slip through during an outage.
@@ -203,11 +219,113 @@ impl AdminAuthState {
             }
         }
     }
+
+    /// Returns true when `user_id` is marked suspended in Redis.
+    pub async fn is_user_suspended(&self, user_id: i32) -> bool {
+        let Some(redis) = &self.redis else {
+            return false;
+        };
+        let key = format!("user_suspended:{user_id}");
+        match redis.get_multiplexed_async_connection().await {
+            Ok(mut conn) => match conn.exists::<_, bool>(key).await {
+                Ok(exists) => exists,
+                Err(err) => {
+                    warn!(error = %err, "User suspension lookup failed; denying request");
+                    true
+                }
+            },
+            Err(err) => {
+                warn!(error = %err, "User suspension lookup failed; denying request");
+                true
+            }
+        }
+    }
+
+    /// Refresh a JWT principal's role from PostgreSQL and fail closed if the
+    /// account is absent, inactive, or the database cannot be queried.
+    async fn refresh_active_principal(&self, principal: &mut Principal) -> bool {
+        let Some(db) = &self.db else {
+            warn!(
+                user_id = principal.id,
+                "JWT account lookup unavailable; denying request"
+            );
+            return false;
+        };
+
+        let result = if principal.id > 0 {
+            sqlx::query_as::<_, (i32, bool, String, String)>(
+                "SELECT id, is_active, role::text, address FROM users WHERE id = $1",
+            )
+            .bind(principal.id)
+            .fetch_optional(db)
+            .await
+        } else {
+            sqlx::query_as::<_, (i32, bool, String, String)>(
+                "SELECT id, is_active, role::text, address FROM users WHERE address = $1",
+            )
+            .bind(&principal.address)
+            .fetch_optional(db)
+            .await
+        };
+
+        match result {
+            Ok(Some((id, true, role, address))) => {
+                principal.id = id;
+                principal.address = address;
+                principal.role = role_from_claim(Some(&role));
+                true
+            }
+            Ok(Some((_, false, _, _))) | Ok(None) => false,
+            Err(err) => {
+                warn!(error = %err, user_id = principal.id, "JWT account lookup failed; denying request");
+                false
+            }
+        }
+    }
+
+    async fn track_user_session(
+        &self,
+        user_id: i32,
+        jti: &str,
+        expires_at: i64,
+    ) -> Result<(), String> {
+        let Some(redis) = &self.redis else {
+            return Err("Redis is required for JWT session tracking".to_string());
+        };
+        let ttl = expires_at
+            .saturating_sub(chrono::Utc::now().timestamp())
+            .min(86_400)
+            .max(1) as u64;
+        let sessions_key = format!("user_sessions:{user_id}");
+        let mut conn = redis
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|error| error.to_string())?;
+        let script = redis::Script::new(
+            r#"
+            redis.call("SADD", KEYS[1], ARGV[1])
+            redis.call("EXPIRE", KEYS[1], ARGV[2])
+            return 1
+            "#,
+        );
+        let _: i32 = script
+            .key(sessions_key)
+            .arg(jti)
+            .arg(ttl)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
 }
 
 /// Extract the bearer token from the `Authorization` header, if well-formed.
 fn bearer_token(request: &Request) -> Option<String> {
-    let value = request.headers().get(header::AUTHORIZATION)?.to_str().ok()?;
+    let value = request
+        .headers()
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
     let token = value.strip_prefix("Bearer ")?.trim();
     if token.is_empty() {
         None
@@ -249,11 +367,10 @@ fn verify_hs256_jwt(token: &str, secret: &str) -> Option<JwtClaims> {
     let claims_bytes = b64url_decode(payload)?;
     let claims: JwtClaims = serde_json::from_slice(&claims_bytes).ok()?;
 
-    if let Some(exp) = claims.exp {
-        let now = chrono::Utc::now().timestamp();
-        if now >= exp {
-            return None;
-        }
+    let exp = claims.exp?;
+    let now = chrono::Utc::now().timestamp();
+    if now >= exp {
+        return None;
     }
 
     Some(claims)
@@ -310,6 +427,13 @@ pub async fn require_admin_auth(
 
     // Static registry tokens (provisioned via env) take precedence.
     if let Some(principal) = auth.principal(&token).cloned() {
+        if principal.id > 0 && auth.is_user_suspended(principal.id).await {
+            return reject(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "User account has been suspended",
+            );
+        }
         return authorize_principal(principal, request, next).await;
     }
 
@@ -334,7 +458,32 @@ pub async fn require_admin_auth(
                 );
             }
 
-            let principal = principal_from_jwt_claims(&claims);
+            let mut principal = principal_from_jwt_claims(&claims);
+            if !auth.refresh_active_principal(&mut principal).await
+                || auth.is_user_suspended(principal.id).await
+            {
+                warn!(
+                    user_id = principal.id,
+                    "Privileged request rejected: user account is suspended or unavailable"
+                );
+                return reject(
+                    StatusCode::UNAUTHORIZED,
+                    "unauthorized",
+                    "User account is suspended or unavailable",
+                );
+            }
+
+            if let (Some(jti), Some(exp)) = (claims.jti.as_deref(), claims.exp) {
+                if let Err(err) = auth.track_user_session(principal.id, jti, exp).await {
+                    warn!(error = %err, user_id = principal.id, "Session tracking failed; denying request");
+                    return reject(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "service_unavailable",
+                        "Session validation is temporarily unavailable",
+                    );
+                }
+            }
+
             return authorize_principal(principal, request, next).await;
         }
     }
@@ -388,9 +537,12 @@ mod tests {
     }
 
     fn guarded_app(auth: AdminAuthState) -> Router {
-        Router::new().route("/admin", get(|| async { "ok" })).route_layer(
-            middleware::from_fn_with_state(Arc::new(auth), require_admin_auth),
-        )
+        Router::new()
+            .route("/admin", get(|| async { "ok" }))
+            .route_layer(middleware::from_fn_with_state(
+                Arc::new(auth),
+                require_admin_auth,
+            ))
     }
 
     async fn status_for(auth_header: Option<&str>) -> StatusCode {
@@ -413,7 +565,8 @@ mod tests {
         let signing_input = format!("{header}.{payload}");
         let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(signing_input.as_bytes());
-        let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        let sig =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
         format!("{signing_input}.{sig}")
     }
 
@@ -480,8 +633,15 @@ mod tests {
         assert!(verify_hs256_jwt(&token, secret).is_none());
     }
 
+    #[test]
+    fn verify_hs256_jwt_rejects_token_without_expiration() {
+        let secret = "test-secret";
+        let token = sign_jwt(secret, r#"{"jti":"no-exp","sub":"1","role":"admin"}"#);
+        assert!(verify_hs256_jwt(&token, secret).is_none());
+    }
+
     #[tokio::test]
-    async fn jwt_admin_token_is_authorized_when_not_revoked() {
+    async fn jwt_admin_token_is_rejected_without_authoritative_account_store() {
         let secret = "jwt-secret";
         let exp = chrono::Utc::now().timestamp() + 3600;
         let token = sign_jwt(
@@ -495,6 +655,42 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let status = guarded_app(auth).oneshot(request).await.unwrap().status();
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn redis_connection_failures_fail_closed_for_revocation_checks() {
+        let auth =
+            AdminAuthState::new().with_redis(redis::Client::open("redis://127.0.0.1:1").unwrap());
+
+        assert!(auth.is_jti_revoked("jti-unavailable").await);
+        assert!(auth.is_user_suspended(42).await);
+    }
+
+    #[test]
+    fn principal_from_jwt_claims_extracts_numeric_user_id() {
+        let claims = JwtClaims {
+            jti: Some("jti-123".to_string()),
+            exp: Some(chrono::Utc::now().timestamp() + 3600),
+            sub: Some("42".to_string()),
+            role: Some("admin".to_string()),
+        };
+        let principal = principal_from_jwt_claims(&claims);
+        assert_eq!(principal.id, 42);
+        assert_eq!(principal.role, Role::Admin);
+    }
+
+    #[test]
+    fn principal_from_jwt_claims_handles_non_numeric_sub() {
+        let claims = JwtClaims {
+            jti: Some("jti-456".to_string()),
+            exp: Some(chrono::Utc::now().timestamp() + 3600),
+            sub: Some("non-numeric-wallet".to_string()),
+            role: Some("user".to_string()),
+        };
+        let principal = principal_from_jwt_claims(&claims);
+        assert_eq!(principal.id, 0);
+        assert_eq!(principal.address, "non-numeric-wallet");
+        assert_eq!(principal.role, Role::User);
     }
 }

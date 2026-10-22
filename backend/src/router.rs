@@ -26,6 +26,7 @@ use crate::{
         dashboard::get_dashboard, errors, profiling, sandbox, stellar, ws::ws_dashboard_handler,
     },
     api::middleware::{
+        auth::{require_admin_auth, AdminAuthState},
         content_type::require_json_content_type,
         idempotency::idempotency_middleware,
         logging::logging_middleware,
@@ -91,6 +92,12 @@ pub fn build_router(
         audit: audit_service,
     } = states;
 
+    let admin_auth_state = Arc::new(
+        AdminAuthState::from_env()
+            .with_redis(redis_client.clone())
+            .with_db(db_pool.clone()),
+    );
+
     let dlq_coordinator = Arc::new(crate::workers::retry::DlqCoordinator::new(Arc::new(redis_client.clone())));
 
     let contracts_router = Router::new()
@@ -118,6 +125,12 @@ pub fn build_router(
         .route("/system-stats", get(admin::get_system_stats))
         .route("/maintenance", post(admin::set_maintenance_mode))
         .route("/logs", get(admin::get_admin_logs))
+        .route("/users/:id/suspend", post(admin::suspend_user))
+        .route("/users/:id/revoke-role", post(admin::revoke_user_role))
+        .route_layer(middleware::from_fn_with_state(
+            admin_auth_state.clone(),
+            require_admin_auth,
+        ))
         .with_state(profiling_state.clone());
 
     let cors = build_cors_layer(config);
@@ -142,6 +155,10 @@ pub fn build_router(
             Router::new()
                 .route("/api/config", get(handle_get_config))
                 .route("/api/config/reload", post(handle_reload))
+                .route_layer(middleware::from_fn_with_state(
+                    admin_auth_state,
+                    require_admin_auth,
+                ))
                 .with_state(config_manager),
         )
         .nest(
@@ -414,7 +431,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_router_allows_bodyless_config_reload_without_content_type() {
+    async fn build_router_allows_bodyless_config_reload_past_content_type_check() {
         let response = test_router()
             .oneshot(
                 Request::builder()
@@ -426,6 +443,25 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        // Auth middleware rejects the unauthenticated call; it must not be rejected
+        // earlier with 415 by the content-type middleware.
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn build_router_protects_admin_user_mutations() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/users/42/suspend")
+                    .method("POST")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
     }
 }

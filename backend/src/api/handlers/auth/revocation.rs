@@ -101,6 +101,15 @@ impl TokenBlocklistService {
         let exists: bool = conn.exists(key).await.map_err(AppError::Redis)?;
         Ok(exists)
     }
+
+    /// Checks if a user is marked suspended in the Redis blocklist.
+    pub async fn is_user_suspended(&self, user_id: i32) -> Result<bool, AppError> {
+        let key = format!("user_suspended:{user_id}");
+        let mut conn = self.redis.get_multiplexed_async_connection().await.map_err(AppError::Redis)?;
+
+        let exists: bool = conn.exists(key).await.map_err(AppError::Redis)?;
+        Ok(exists)
+    }
 }
 
 #[cfg(test)]
