@@ -96,11 +96,11 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/cargo-audit
-          key: cargo-audit-${{ runner.os }}
+          key: cargo-audit-0.22.2-${{ runner.os }}
 
       - name: Install cargo-audit
-        # --locked ensures the installed binary matches the lockfile hash.
-        run: cargo install cargo-audit --locked || true
+        # Pin a release that can parse CVSS 4.0 advisories in the RustSec database.
+        run: cargo install cargo-audit --version 0.22.2 --locked
 
       - name: Run vulnerability audit
         # --deny warnings turns advisory warnings into hard failures.
