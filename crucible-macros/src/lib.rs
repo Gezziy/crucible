@@ -475,8 +475,8 @@ pub fn fixture_derive(input: TokenStream) -> TokenStream {
                         contract_types.push(ct.clone());
                         field_bindings.push(quote! {
                             let #field_name = <#field_ty>::new(
-                                env.inner(),
-                                &env.contract_id::<#ct>(),
+                                #env_ident.inner(),
+                                &#env_ident.contract_id::<#ct>(),
                             );
                         });
                         field_inits.push(quote! { #field_name, });
@@ -511,7 +511,7 @@ pub fn fixture_derive(input: TokenStream) -> TokenStream {
             /// a fresh `MockEnv` and wires all `#[contract_client]` fields. Other
             /// fields (besides `env`) are set to their `Default` value.
             pub fn setup() -> Self {
-                let env = #env_init;
+                let #env_ident = #env_init;
                 // Fields are bound before the struct literal so `env` is still
                 // borrowable while the contract clients are built.
                 #(#field_bindings)*

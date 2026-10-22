@@ -1645,7 +1645,7 @@ impl MockStellarAsset {
 #[cfg(test)]
 mod stellar_asset_tests {
     use super::*;
-    use crate::Stroops;
+    use crate::env::Stroops;
     use soroban_sdk::testutils::Address as _;
 
     #[test]
