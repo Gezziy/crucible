@@ -44,5 +44,5 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace --exclude backend --features full
+      - run: cargo test --workspace --exclude backend --all-features
 
