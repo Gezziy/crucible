@@ -152,7 +152,7 @@ impl ReentrantBorrower {
 }
 
 #[test]
-#[should_panic(expected = "reentrancy detected")]
+#[should_panic(expected = "Contract re-entry is not allowed")]
 fn test_flash_mint_reentrancy_reverts() {
     let env = Env::default();
     env.mock_all_auths();

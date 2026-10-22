@@ -213,7 +213,7 @@ mod tests {
             log_aggregator::LogAggregator, sys_metrics::MetricsExporter,
         },
     };
-    use axum::{middleware, routing::post, Json, Router};
+    use axum::{middleware, response::IntoResponse, routing::post, Json, Router};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
