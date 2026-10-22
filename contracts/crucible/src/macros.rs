@@ -356,6 +356,28 @@ macro_rules! assert_not_emitted {
 /// ```
 #[macro_export]
 macro_rules! assert_approx_eq {
+    ($actual:expr, $expected:expr, $tolerance:expr, $msg:literal) => {{
+        let __actual = $actual;
+        let __expected = $expected;
+        let __tolerance = $tolerance;
+        let __diff = if __actual >= __expected {
+            __actual - __expected
+        } else {
+            __expected - __actual
+        };
+        assert!(
+            __tolerance >= __tolerance - __tolerance,
+            "{}: tolerance must be non-negative",
+            $msg,
+        );
+        assert!(
+            __diff <= __tolerance,
+            "{}: difference {:?} exceeds tolerance {:?}",
+            $msg,
+            __diff,
+            __tolerance,
+        );
+    }};
     ($actual:expr, $expected:expr, $tolerance:expr) => {{
         let __actual = $actual;
         let __expected = $expected;

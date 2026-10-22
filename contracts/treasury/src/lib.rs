@@ -17,6 +17,13 @@ enum DataKey {
     SpentInPeriod,   // i128 — amount withdrawn in current period
     /// Ledger sequence at which the current spending period started.
     LastResetSequence, // u32
+    Guardians,
+    TimelockBaseDelay,
+    TimelockPerUnit,
+    TimelockUnit,
+    TimelockThreshold,
+    NextOpId,
+    PendingOps,
 }
 
 /// Approximate ledgers per day (86_400s / 5s close). Period resets are tied to
@@ -42,6 +49,20 @@ pub enum ContractError {
     ReentrancyGuardLocked = 8,
     /// Withdrawal would exceed the daily spending limit for the current period.
     SpendingLimitExceeded = 9,
+    NotGuardian = 10,
+    UnknownPendingOp = 11,
+    WithdrawalCancelled = 12,
+    TimelockNotElapsed = 13,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingWithdrawal {
+    pub to: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub execute_after: u64,
+    pub cancelled: bool,
 }
 
 /// Default: transfers ≥ this amount must be queued (stroops / token base units).
@@ -92,11 +113,43 @@ impl Treasury {
         // Spending period keyed to ledger sequence (not wall-clock timestamp).
         env.storage().instance().set(&DataKey::DailyLimit, &daily_limit);
         env.storage().instance().set(&DataKey::SpentInPeriod, &0i128);
+        env.storage().instance().set(&DataKey::NextOpId, &1u64);
         env.storage()
             .instance()
             .set(&DataKey::LastResetSequence, &env.ledger().sequence());
         env.events()
             .publish((symbol_short!("init"),), (admins, quorum));
+    }
+
+    /// Add a guardian after authorization by the configured admin quorum.
+    pub fn add_guardian(env: Env, guardian: Address, signers: Vec<Address>) {
+        for signer in signers.iter() {
+            signer.require_auth();
+        }
+
+        let quorum: u32 = env.storage().instance().get(&DataKey::Quorum).unwrap();
+        let admins: Vec<Address> = env.storage().instance().get(&DataKey::Admins).unwrap();
+        let mut valid_signers = 0u32;
+        for signer in signers.iter() {
+            if admins.iter().any(|admin| admin == signer) {
+                valid_signers += 1;
+            }
+        }
+        if valid_signers < quorum {
+            panic_with_error!(&env, ContractError::InsufficientQuorum);
+        }
+
+        let mut guardians: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Guardians)
+            .unwrap_or(Vec::new(&env));
+        if !guardians.iter().any(|existing| existing == guardian) {
+            guardians.push_back(guardian.clone());
+        }
+        env.storage().instance().set(&DataKey::Guardians, &guardians);
+        env.events()
+            .publish((symbol_short!("guardian"),), guardian);
     }
 
     fn is_admin(env: &Env, caller: &Address) -> bool {
