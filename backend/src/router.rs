@@ -412,4 +412,20 @@ mod tests {
 
         assert_eq!(response.status(), axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
+
+    #[tokio::test]
+    async fn build_router_allows_bodyless_config_reload_without_content_type() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/config/reload")
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+    }
 }
