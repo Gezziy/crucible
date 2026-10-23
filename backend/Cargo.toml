@@ -115,13 +115,13 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 moka = { version = "0.12", features = ["future"] }
 hmac = "0.12"
 hex = "0.4"
+mime = "0.3"
 
 [dev-dependencies]
 tokio-test = "0.4"
 testcontainers = "0.28"
 wiremock = "0.6"
 hyper = { version = "1.0", features = ["full"] }
-mime = "0.3"
 mockall = "0.15"
 criterion = { version = "0.8", features = ["async_tokio"] }
 proptest = "1.5.0"
