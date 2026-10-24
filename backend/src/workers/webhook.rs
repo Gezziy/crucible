@@ -96,25 +96,39 @@ impl WebhookDispatcherWorker {
             return false;
         }
 
-        computed.as_bytes().ct_eq(expected_signature.as_bytes()).into()
+        computed
+            .as_bytes()
+            .ct_eq(expected_signature.as_bytes())
+            .into()
     }
 
-    /// Calculate exponential retry backoff duration with full jitter for a given attempt.
+    /// Calculate exponential retry backoff duration with full jitter for a given attempt,
+    /// enforcing a minimum delay floor (base_delay / 2) to prevent zero-millisecond retries.
     pub fn calculate_retry_delay(&self, attempt: u32) -> Duration {
-        let factor = 2u64.saturating_pow(attempt.saturating_sub(1));
-        let max_delay_ms = self.base_delay_secs.saturating_mul(factor).saturating_mul(1000);
-        if max_delay_ms == 0 {
+        let base_delay_ms = self.base_delay_secs.saturating_mul(1000);
+        if base_delay_ms == 0 {
             return Duration::ZERO;
         }
+
+        let factor = 2u64.saturating_pow(attempt.saturating_sub(1));
+        let max_delay_ms = base_delay_ms.saturating_mul(factor);
+
+        // Enforce a minimum backoff floor (base_delay / 2, minimum 100ms, capped at max_delay_ms)
+        let min_delay_ms = (base_delay_ms / 2).max(100).min(max_delay_ms);
+        let jitter_window_ms = max_delay_ms.saturating_sub(min_delay_ms);
 
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .subsec_nanos() as u64;
         let mixed = nanos.wrapping_add((attempt as u64).wrapping_mul(6_364_136_223_846_793_005));
-        let jitter_ms = mixed % max_delay_ms;
+        let jitter_ms = if jitter_window_ms > 0 {
+            mixed % jitter_window_ms
+        } else {
+            0
+        };
 
-        Duration::from_millis(jitter_ms)
+        Duration::from_millis(min_delay_ms.saturating_add(jitter_ms))
     }
 
     /// Dispatch a webhook event to an endpoint with HMAC signature.
@@ -132,7 +146,10 @@ impl WebhookDispatcherWorker {
         headers.insert("Content-Type".to_string(), "application/json".to_string());
         headers.insert("X-Crucible-Signature".to_string(), signature);
         headers.insert("X-Crucible-Event-Id".to_string(), event.id.to_string());
-        headers.insert("X-Crucible-Event-Type".to_string(), event.event_type.clone());
+        headers.insert(
+            "X-Crucible-Event-Type".to_string(),
+            event.event_type.clone(),
+        );
 
         info!(
             endpoint_id = %endpoint.id,
@@ -148,14 +165,37 @@ impl WebhookDispatcherWorker {
                 let host = url
                     .host_str()
                     .ok_or_else(|| anyhow::anyhow!("webhook URL has no host"))?;
+
+                let pinned_addr = addresses[0];
+                let port = pinned_addr.port();
+                let host_header = match url.port() {
+                    Some(p) => format!("{}:{}", host, p),
+                    None => host.to_string(),
+                };
+                let mut request_headers = headers.clone();
+                request_headers.insert("Host".to_string(), host_header);
+
+                let target_url = if url.scheme() == "http" {
+                    let mut direct_url = url.clone();
+                    direct_url
+                        .set_ip_host(pinned_addr.ip())
+                        .map_err(|_| anyhow::anyhow!("failed to set pinned IP in webhook URL"))?;
+                    direct_url
+                        .set_port(Some(port))
+                        .map_err(|_| anyhow::anyhow!("failed to set pinned port in webhook URL"))?;
+                    direct_url
+                } else {
+                    url.clone()
+                };
+
                 let client = reqwest::Client::builder()
                     .connect_timeout(WEBHOOK_TIMEOUT)
                     .timeout(WEBHOOK_TIMEOUT)
                     .redirect(reqwest::redirect::Policy::none())
-                    .resolve_to_addrs(host, &addresses)
+                    .resolve_to_addrs(host, std::slice::from_ref(&pinned_addr))
                     .build()?;
 
-                send_webhook_request(&client, &url, &headers, &serialized_body)
+                send_webhook_request(&client, &target_url, &request_headers, &serialized_body)
                     .await
                     .map_err(anyhow::Error::from)
             })
@@ -451,5 +491,91 @@ mod tests {
         let log = worker.retry_webhook_delivery(&endpoint, &event).await;
         assert!(!log.success);
         assert_eq!(log.attempt, 1);
+    }
+
+    #[tokio::test]
+    async fn test_dns_rebinding_pins_direct_ip_and_sets_host_header() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let event = WebhookEvent {
+            id: Uuid::new_v4(),
+            event_type: "contract_deployed".to_string(),
+            payload: serde_json::json!({ "contract_id": "0xabc" }),
+            timestamp: chrono::Utc::now().timestamp(),
+        };
+        let serialized_body = serde_json::to_string(&event).unwrap();
+
+        Mock::given(method("POST"))
+            .and(path("/webhook"))
+            .and(header("Host", "webhook.example.com"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let mut headers = HashMap::new();
+        headers.insert("Content-Type".to_string(), "application/json".to_string());
+        headers.insert("Host".to_string(), "webhook.example.com".to_string());
+
+        let url = Url::parse(&format!("{}/webhook", server.uri())).unwrap();
+        let (status, success, response_body) =
+            send_webhook_request(&client, &url, &headers, &serialized_body)
+                .await
+                .unwrap();
+
+        assert_eq!(status, 200);
+        assert!(success);
+        assert_eq!(response_body.as_deref(), Some("ok"));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_event_rejects_internal_cloud_metadata() {
+        let worker = WebhookDispatcherWorker::default();
+        let endpoint = WebhookEndpoint {
+            id: Uuid::new_v4(),
+            url: "http://169.254.169.254/latest/meta-data".to_string(),
+            secret: "secret".to_string(),
+            event_types: vec!["contract_deployed".to_string()],
+            enabled: true,
+        };
+        let event = WebhookEvent {
+            id: Uuid::new_v4(),
+            event_type: "contract_deployed".to_string(),
+            payload: serde_json::json!({ "contract_id": "0xabc" }),
+            timestamp: chrono::Utc::now().timestamp(),
+        };
+
+        let log = worker.dispatch_event(&endpoint, &event, 1).await;
+        assert!(!log.success);
+        assert_eq!(log.status_code, None);
+        assert_eq!(log.endpoint_id, endpoint.id);
+        assert_eq!(log.event_id, event.id);
+    }
+
+    #[test]
+    fn test_calculate_retry_delay_enforces_minimum_floor() {
+        let worker = WebhookDispatcherWorker {
+            base_delay_secs: 2,
+            ..Default::default()
+        };
+
+        for attempt in 1..=5 {
+            let delay = worker.calculate_retry_delay(attempt);
+            assert!(
+                delay.as_millis() >= 1000,
+                "Delay for attempt {attempt} should be at least 1000ms floor, got {:?}",
+                delay
+            );
+            assert!(
+                delay.as_millis() <= (2000 * 2u64.pow(attempt - 1)) as u128,
+                "Delay for attempt {attempt} should not exceed maximum delay"
+            );
+        }
     }
 }

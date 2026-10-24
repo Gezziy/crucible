@@ -48,6 +48,8 @@ impl From<CoverageError> for AppError {
 #[serde(rename_all = "camelCase")]
 pub struct TestCoverage {
     pub id: Uuid,
+    #[sqlx(default)]
+    pub contract_id: Option<String>,
     pub project_name: String,
     pub branch: String,
     pub commit_sha: String,
@@ -62,12 +64,113 @@ pub struct TestCoverage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NewTestCoverage {
+    #[serde(default)]
+    pub contract_id: Option<String>,
     pub project_name: String,
     pub branch: String,
     pub commit_sha: String,
     pub coverage_percent: f64,
     pub total_lines: i32,
     pub covered_lines: i32,
+}
+
+// ── Macro expansion & Synthetic span source mapping ──────────────────────────
+
+/// A source code location span.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceSpan {
+    pub file_path: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub is_synthetic: bool,
+}
+
+/// Represents a tracked macro expansion span (e.g. `#[contractimpl]`, `#[contracttype]`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacroExpansionSpan {
+    pub macro_name: String,
+    pub callsite_span: SourceSpan,
+    pub expansion_start_line: usize,
+    pub expansion_end_line: usize,
+}
+
+/// Instruction counter hit recorded by WASM test instrumentation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstructionCounterHit {
+    pub instruction_offset: u64,
+    pub line: usize,
+    pub hit_count: u64,
+}
+
+/// Resolves synthetic compiler and macro-expansion spans back to physical contract source lines.
+///
+/// Addresses Issue #1237 (`[79/100] Coverage Source Map Resolution Fails on Macro-Expanded Functions`).
+/// Contracts using procedural derive macros (like `#[contractimpl]`) produce synthetic dispatcher spans
+/// that fail default 1:1 line mapping, leading to false 0% coverage reports.
+#[derive(Debug, Clone, Default)]
+pub struct CoverageSourceMapResolver {
+    macro_expansions: Vec<MacroExpansionSpan>,
+}
+
+impl CoverageSourceMapResolver {
+    pub fn new() -> Self {
+        Self {
+            macro_expansions: Vec::new(),
+        }
+    }
+
+    /// Register a tracked macro expansion range and its callsite in the contract source.
+    pub fn register_macro_expansion(&mut self, expansion: MacroExpansionSpan) {
+        self.macro_expansions.push(expansion);
+    }
+
+    /// Resolve an executed instruction's source line.
+    ///
+    /// If the instruction line falls within a known synthetic macro expansion range
+    /// (e.g. from `#[contractimpl]`), this remaps it to the physical callsite line
+    /// in the contract implementation, attributing coverage to the contract source.
+    pub fn resolve_line(&self, executed_line: usize) -> usize {
+        for expansion in &self.macro_expansions {
+            if executed_line >= expansion.expansion_start_line
+                && executed_line <= expansion.expansion_end_line
+            {
+                return expansion.callsite_span.start_line;
+            }
+        }
+        executed_line
+    }
+
+    /// Resolve coverage statistics across a set of executed instruction counter hits.
+    pub fn calculate_resolved_coverage(
+        &self,
+        total_contract_lines: i32,
+        instruction_hits: &[InstructionCounterHit],
+    ) -> (i32, f64) {
+        use std::collections::HashSet;
+        let mut covered_lines = HashSet::new();
+
+        for hit in instruction_hits {
+            if hit.hit_count > 0 {
+                let resolved = self.resolve_line(hit.line);
+                if resolved > 0 && resolved <= total_contract_lines as usize {
+                    covered_lines.insert(resolved);
+                }
+            }
+        }
+
+        let covered_count = covered_lines.len() as i32;
+        let percent = if total_contract_lines > 0 {
+            let p = (covered_count as f64 / total_contract_lines as f64) * 100.0;
+            (p * 100.0).round() / 100.0
+        } else {
+            0.0
+        };
+
+        (covered_count, percent)
+    }
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
@@ -83,6 +186,32 @@ impl TestCoverageService {
         Self { db, redis }
     }
 
+    /// Resolve raw execution instruction hits for a project, applying macro expansion tracking
+    /// and synthetic span remapping before submitting the final coverage record.
+    pub fn resolve_and_build_coverage(
+        project_name: impl Into<String>,
+        branch: impl Into<String>,
+        commit_sha: impl Into<String>,
+        total_lines: i32,
+        hits: &[InstructionCounterHit],
+        resolver: &CoverageSourceMapResolver,
+    ) -> Result<NewTestCoverage, CoverageError> {
+        let (covered_lines, coverage_percent) =
+            resolver.calculate_resolved_coverage(total_lines, hits);
+
+        let report = NewTestCoverage {
+            project_name: project_name.into(),
+            branch: branch.into(),
+            commit_sha: commit_sha.into(),
+            coverage_percent,
+            total_lines,
+            covered_lines,
+        };
+
+        validate_coverage(&report)?;
+        Ok(report)
+    }
+
     /// Persist a new coverage snapshot and update the Redis cache.
     #[instrument(skip(self, data), fields(project = %data.project_name, branch = %data.branch))]
     pub async fn submit_coverage(
@@ -93,13 +222,21 @@ impl TestCoverageService {
 
         info!("Persisting coverage report");
 
+        let contract_id = data
+            .contract_id
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&data.project_name);
+
         let record = sqlx::query_as::<_, TestCoverage>(
             "INSERT INTO test_coverage \
-             (id, project_name, branch, commit_sha, coverage_percent, total_lines, covered_lines, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+             (id, contract_id, project_name, branch, commit_sha, coverage_percent, total_lines, covered_lines, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
              RETURNING *",
         )
         .bind(Uuid::new_v4())
+        .bind(contract_id)
         .bind(&data.project_name)
         .bind(&data.branch)
         .bind(&data.commit_sha)
@@ -130,7 +267,7 @@ impl TestCoverageService {
         debug!("Coverage cache miss – querying database");
         let record = sqlx::query_as::<_, TestCoverage>(
             "SELECT * FROM test_coverage \
-             WHERE project_name = $1 \
+             WHERE project_name = $1 OR contract_id = $1 \
              ORDER BY created_at DESC LIMIT 1",
         )
         .bind(project_name)
@@ -140,6 +277,29 @@ impl TestCoverageService {
 
         self.cache_set(project_name, &record).await?;
         Ok(record)
+    }
+
+    /// Return the historical coverage progression for a contract or project.
+    ///
+    /// Utilizes the composite index on (contract_id, created_at DESC) and (project_name, created_at DESC).
+    #[instrument(skip(self), fields(contract_id = %contract_id, limit = %limit))]
+    pub async fn get_coverage_progression(
+        &self,
+        contract_id: &str,
+        limit: i64,
+    ) -> Result<Vec<TestCoverage>, CoverageError> {
+        let max_limit = limit.clamp(1, 100);
+        let records = sqlx::query_as::<_, TestCoverage>(
+            "SELECT * FROM test_coverage \
+             WHERE contract_id = $1 OR project_name = $1 \
+             ORDER BY created_at DESC LIMIT $2",
+        )
+        .bind(contract_id)
+        .bind(max_limit)
+        .fetch_all(&self.db)
+        .await?;
+
+        Ok(records)
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
@@ -217,6 +377,7 @@ mod tests {
 
     fn valid_coverage() -> NewTestCoverage {
         NewTestCoverage {
+            contract_id: Some("contract-123".to_string()),
             project_name: "my-contract".to_string(),
             branch: "main".to_string(),
             commit_sha: "abc123".to_string(),
@@ -224,6 +385,17 @@ mod tests {
             total_lines: 200,
             covered_lines: 175,
         }
+    }
+
+    #[test]
+    fn new_test_coverage_deserializes_with_optional_contract_id() {
+        let json = r#"{"projectName":"my-proj","branch":"main","commitSha":"123","coveragePercent":90.0,"totalLines":10,"coveredLines":9}"#;
+        let parsed: NewTestCoverage = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.contract_id, None);
+
+        let json_with_contract = r#"{"contractId":"c-456","projectName":"my-proj","branch":"main","commitSha":"123","coveragePercent":90.0,"totalLines":10,"coveredLines":9}"#;
+        let parsed_with_contract: NewTestCoverage = serde_json::from_str(json_with_contract).unwrap();
+        assert_eq!(parsed_with_contract.contract_id.as_deref(), Some("c-456"));
     }
 
     // ── validate_coverage ─────────────────────────────────────────────────────
@@ -349,4 +521,117 @@ mod tests {
             "coverage:latest:my-project"
         );
     }
+
+    // ── Macro expansion source mapping tests (#1237) ──────────────────────────
+
+    #[test]
+    fn test_resolve_line_remaps_synthetic_macro_expansion_to_callsite() {
+        // Issue #1237: Coverage Source Map Resolution Fails on Macro-Expanded Functions
+        let mut resolver = CoverageSourceMapResolver::new();
+        resolver.register_macro_expansion(MacroExpansionSpan {
+            macro_name: "contractimpl".to_string(),
+            callsite_span: SourceSpan {
+                file_path: "src/contract.rs".to_string(),
+                start_line: 25,
+                end_line: 60,
+                is_synthetic: false,
+            },
+            expansion_start_line: 1000,
+            expansion_end_line: 1050,
+        });
+
+        // Synthetic instruction lines inside macro expansion range remap to callsite start line
+        assert_eq!(resolver.resolve_line(1000), 25);
+        assert_eq!(resolver.resolve_line(1025), 25);
+        assert_eq!(resolver.resolve_line(1050), 25);
+
+        // Outside lines remain unchanged
+        assert_eq!(resolver.resolve_line(42), 42);
+        assert_eq!(resolver.resolve_line(999), 999);
+        assert_eq!(resolver.resolve_line(1051), 1051);
+    }
+
+    #[test]
+    fn test_macro_expanded_contract_coverage_calculates_correct_percentage() {
+        // Issue #1237: Prevent false 0% coverage on contracts using procedural derive macros
+        let mut resolver = CoverageSourceMapResolver::new();
+        resolver.register_macro_expansion(MacroExpansionSpan {
+            macro_name: "contractimpl".to_string(),
+            callsite_span: SourceSpan {
+                file_path: "src/lib.rs".to_string(),
+                start_line: 10,
+                end_line: 30,
+                is_synthetic: false,
+            },
+            expansion_start_line: 500,
+            expansion_end_line: 550,
+        });
+
+        let total_lines = 50;
+        let hits = vec![
+            // Instruction inside macro-generated dispatcher
+            InstructionCounterHit {
+                instruction_offset: 0x10,
+                line: 520,
+                hit_count: 5,
+            },
+            // Physical source line
+            InstructionCounterHit {
+                instruction_offset: 0x20,
+                line: 15,
+                hit_count: 2,
+            },
+            // Zero hits (uncovered line)
+            InstructionCounterHit {
+                instruction_offset: 0x30,
+                line: 20,
+                hit_count: 0,
+            },
+        ];
+
+        let (covered_lines, coverage_percent) =
+            resolver.calculate_resolved_coverage(total_lines, &hits);
+
+        // Resolved lines should include line 10 (from macro) and line 15 (physical) = 2 covered lines
+        assert_eq!(covered_lines, 2);
+        assert_eq!(coverage_percent, 4.0); // 2 / 50 * 100 = 4.0%
+    }
+
+    #[test]
+    fn test_resolve_and_build_coverage_success() {
+        let mut resolver = CoverageSourceMapResolver::new();
+        resolver.register_macro_expansion(MacroExpansionSpan {
+            macro_name: "contractimpl".to_string(),
+            callsite_span: SourceSpan {
+                file_path: "src/token.rs".to_string(),
+                start_line: 5,
+                end_line: 15,
+                is_synthetic: false,
+            },
+            expansion_start_line: 200,
+            expansion_end_line: 250,
+        });
+
+        let hits = vec![InstructionCounterHit {
+            instruction_offset: 0x04,
+            line: 210,
+            hit_count: 1,
+        }];
+
+        let result = TestCoverageService::resolve_and_build_coverage(
+            "soroban-token",
+            "main",
+            "commit123",
+            20,
+            &hits,
+            &resolver,
+        );
+
+        assert!(result.is_ok());
+        let cov = result.unwrap();
+        assert_eq!(cov.project_name, "soroban-token");
+        assert_eq!(cov.covered_lines, 1);
+        assert_eq!(cov.coverage_percent, 5.0); // 1 / 20 * 100 = 5.0%
+    }
 }
+

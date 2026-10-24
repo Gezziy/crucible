@@ -50,6 +50,7 @@ struct CircuitBreakerInner {
     state: CircuitState,
     failure_timestamps: VecDeque<Instant>,
     consecutive_successes: u32,
+    probe_in_flight: bool,
     config: CircuitBreakerConfig,
 }
 
@@ -59,6 +60,7 @@ impl CircuitBreakerInner {
             state: CircuitState::Closed,
             failure_timestamps: VecDeque::new(),
             consecutive_successes: 0,
+            probe_in_flight: false,
             config,
         }
     }
@@ -81,19 +83,28 @@ impl CircuitBreakerInner {
                 if opened_at.elapsed() >= self.config.recovery_timeout {
                     self.state = CircuitState::HalfOpen;
                     self.consecutive_successes = 0;
+                    self.probe_in_flight = true;
                     info!("Circuit breaker transitioning to HalfOpen");
                     true
                 } else {
                     false
                 }
             }
-            CircuitState::HalfOpen => true,
+            CircuitState::HalfOpen => {
+                if !self.probe_in_flight {
+                    self.probe_in_flight = true;
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
 
     fn record_success(&mut self) {
         match self.state {
             CircuitState::HalfOpen => {
+                self.probe_in_flight = false;
                 self.consecutive_successes += 1;
                 if self.consecutive_successes >= self.config.success_threshold {
                     self.state = CircuitState::Closed;
@@ -131,6 +142,7 @@ impl CircuitBreakerInner {
                 }
             }
             CircuitState::HalfOpen => {
+                self.probe_in_flight = false;
                 self.state = CircuitState::Open { opened_at: now };
                 self.failure_timestamps.clear();
                 self.consecutive_successes = 0;
@@ -197,6 +209,11 @@ impl CircuitBreaker {
             CircuitState::HalfOpen => "half_open",
         }
     }
+
+    /// Returns the number of failures currently recorded in the sliding window.
+    pub async fn failure_count(&self) -> usize {
+        self.inner.read().await.failure_timestamps.len()
+    }
 }
 
 #[cfg(test)]
@@ -251,6 +268,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_half_open_limits_concurrency_to_single_probe() {
+        let cb = CircuitBreaker::new("test", fast_config());
+        for _ in 0..3 {
+            let _ = cb.call(|| async { Err::<(), _>("fail") }).await;
+        }
+        assert_eq!(cb.state_label().await, "open");
+
+        // Wait for recovery timeout
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+
+        let cb_clone = cb.clone();
+        let probe_handle = tokio::spawn(async move {
+            cb_clone
+                .call(|| async move {
+                    let _ = started_tx.send(());
+                    let _ = release_rx.await;
+                    Ok::<_, String>("probe_ok")
+                })
+                .await
+        });
+
+        // Wait for probe to start and acquire the canary slot
+        started_rx.await.unwrap();
+
+        // While probe is in-flight in HalfOpen, concurrent requests must be rejected
+        let concurrent_result = cb.call(|| async { Ok::<_, String>("concurrent") }).await;
+        assert!(
+            matches!(concurrent_result, Err(CircuitBreakerError::Open(_))),
+            "Concurrent requests in HalfOpen must be rejected while probe is in flight"
+        );
+
+        // Allow probe to finish
+        let _ = release_tx.send(());
+        let probe_result = probe_handle.await.unwrap();
+        assert!(probe_result.is_ok());
+
+        // Probe succeeded, so with success_threshold = 1, circuit is now closed
+        assert_eq!(cb.state_label().await, "closed");
+        let next_result = cb.call(|| async { Ok::<_, String>("next") }).await;
+        assert!(next_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_half_open_probe_failure_reopens_circuit() {
+        let cb = CircuitBreaker::new("test", fast_config());
+        for _ in 0..3 {
+            let _ = cb.call(|| async { Err::<(), _>("fail") }).await;
+        }
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        let probe_result = cb.call(|| async { Err::<(), _>("probe_failed") }).await;
+        assert!(matches!(probe_result, Err(CircuitBreakerError::ServiceError(_))));
+
+        // Circuit must immediately be Open again
+        assert_eq!(cb.state_label().await, "open");
+        let next_result = cb.call(|| async { Ok::<_, String>("next") }).await;
+        assert!(matches!(next_result, Err(CircuitBreakerError::Open(_))));
+    }
+
+    #[tokio::test]
     async fn test_sliding_window_catches_fluttering_failures_interspersed_with_successes() {
         let cb = CircuitBreaker::new("test", fast_config());
         // Flaky service alternates: fail, success, fail, success, fail
@@ -264,5 +344,65 @@ mod tests {
         let result = cb.call(|| async { Ok::<_, String>("ok") }).await;
         assert!(matches!(result, Err(CircuitBreakerError::Open(_))));
         assert_eq!(cb.state_label().await, "open");
+    }
+
+    #[tokio::test]
+    async fn test_fluttering_failures_trip_breaker_sliding_window() {
+        let cb = CircuitBreaker::new("test", fast_config());
+        let _ = cb.call(|| async { Err::<(), _>("fail") }).await;
+        let _ = cb.call(|| async { Err::<(), _>("fail") }).await;
+        assert_eq!(cb.failure_count().await, 2);
+
+        // A single success must not reset failure history in Closed state.
+        let ok_res = cb.call(|| async { Ok::<_, String>("ok") }).await;
+        assert!(ok_res.is_ok());
+        assert_eq!(cb.failure_count().await, 2);
+
+        let _ = cb.call(|| async { Err::<(), _>("fail") }).await;
+        assert_eq!(cb.state_label().await, "open");
+
+        let blocked = cb.call(|| async { Ok::<_, String>("ok") }).await;
+        assert!(matches!(blocked, Err(CircuitBreakerError::Open(_))));
+    }
+
+    #[tokio::test]
+    async fn test_failures_expire_outside_sliding_window() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 3,
+            recovery_timeout: Duration::from_millis(50),
+            success_threshold: 1,
+            failure_window: Duration::from_millis(60),
+        };
+        let cb = CircuitBreaker::new("test", config);
+
+        let _ = cb.call(|| async { Err::<(), _>("fail") }).await;
+        let _ = cb.call(|| async { Err::<(), _>("fail") }).await;
+        assert_eq!(cb.failure_count().await, 2);
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let ok_res = cb.call(|| async { Ok::<_, String>("ok") }).await;
+        assert!(ok_res.is_ok());
+        assert_eq!(cb.failure_count().await, 0);
+
+        let _ = cb.call(|| async { Err::<(), _>("fail") }).await;
+        assert_eq!(cb.failure_count().await, 1);
+        assert_eq!(cb.state_label().await, "closed");
+    }
+
+    #[tokio::test]
+    async fn test_recovery_clears_sliding_window() {
+        let cb = CircuitBreaker::new("test", fast_config());
+        for _ in 0..3 {
+            let _ = cb.call(|| async { Err::<(), _>("fail") }).await;
+        }
+        assert_eq!(cb.state_label().await, "open");
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        let probe = cb.call(|| async { Ok::<_, String>("ok") }).await;
+        assert!(probe.is_ok());
+        assert_eq!(cb.state_label().await, "closed");
+        assert_eq!(cb.failure_count().await, 0);
     }
 }

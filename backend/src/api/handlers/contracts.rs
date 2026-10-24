@@ -100,6 +100,54 @@ pub async fn compile_contract(
         .await
         .map_err(AppError::Database)?;
 
+    if let Some(ref verif) = result.verification {
+        if !verif.is_valid {
+            return Err(AppError::ValidationError(format!(
+                "Bytecode verification failed: {}",
+                verif.errors.join("; ")
+            )));
+        }
+    }
+
+    Ok(Json(ApiResponse::new(result)))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyBytecodeRequest {
+    pub bytecode: Option<String>,
+    pub bytecode_hex: Option<String>,
+    pub bytecode_base64: Option<String>,
+}
+
+/// POST /api/v1/contracts/verify-bytecode
+pub async fn verify_bytecode(
+    Json(payload): Json<VerifyBytecodeRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let raw_bytes = if let Some(hex_str) = payload.bytecode_hex {
+        hex::decode(hex_str.trim().trim_start_matches("0x"))
+            .map_err(|e| AppError::ValidationError(format!("Invalid hex bytecode: {}", e)))?
+    } else if let Some(b64_str) = payload.bytecode_base64 {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(b64_str.trim())
+            .map_err(|e| AppError::ValidationError(format!("Invalid base64 bytecode: {}", e)))?
+    } else if let Some(raw_str) = payload.bytecode {
+        if let Ok(b) = hex::decode(raw_str.trim().trim_start_matches("0x")) {
+            b
+        } else {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(raw_str.trim())
+                .map_err(|e| AppError::ValidationError(format!("Invalid bytecode encoding (expected hex or base64): {}", e)))?
+        }
+    } else {
+        return Err(AppError::ValidationError(
+            "bytecode or bytecodeHex or bytecodeBase64 must be provided".to_string(),
+        ));
+    };
+
+    let result = crate::services::compilation::SorobanWasmVerifier::verify(&raw_bytes);
     Ok(Json(ApiResponse::new(result)))
 }
 
@@ -136,6 +184,13 @@ pub async fn analyze_dependencies(
         .analyze(&payload.cargo_toml)
         .await
         .map_err(AppError::Database)?;
+
+    if result.max_depth_exceeded {
+        return Err(AppError::ValidationError(format!(
+            "Dependency graph recursion exceeds maximum limit of {} layers",
+            crate::services::dependency_analyzer::MAX_DEPENDENCY_DEPTH
+        )));
+    }
 
     Ok(Json(ApiResponse::new(result)))
 }

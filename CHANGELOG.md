@@ -1,3 +1,156 @@
+## [1.36.11](https://github.com/benelabs/crucible/compare/v1.36.10...v1.36.11) (2026-10-23)
+
+### Bug Fixes
+
+* **contracts:** verify soroban wasm export signatures on compile ([#1153](https://github.com/benelabs/crucible/issues/1153)) ([#1338](https://github.com/benelabs/crucible/issues/1338)) ([704710d](https://github.com/benelabs/crucible/commit/704710dd5842fee9c98b6f477af4ce39055662ff))
+
+## [1.36.10](https://github.com/benelabs/crucible/compare/v1.36.9...v1.36.10) (2026-10-23)
+
+### Bug Fixes
+
+* **indexer:** stream historical events through bounded channel with chunked database inserts ([#1179](https://github.com/benelabs/crucible/issues/1179)) ([#1352](https://github.com/benelabs/crucible/issues/1352)) ([d9bd9a5](https://github.com/benelabs/crucible/commit/d9bd9a58c4359f3c0e38620d2d24181a593c8230))
+* **vault:** implement in-memory secret cache with memory zeroization and logging protection ([#1253](https://github.com/benelabs/crucible/issues/1253)) ([#1361](https://github.com/benelabs/crucible/issues/1361)) ([6aff996](https://github.com/benelabs/crucible/commit/6aff996107db82dd2d8b099de800a8d8339c8f15))
+
+## [1.36.9](https://github.com/benelabs/crucible/compare/v1.36.8...v1.36.9) (2026-10-23)
+
+### Bug Fixes
+
+* **alerts:** enforce 5-minute sliding-window deduplication on ingested alerts ([#1152](https://github.com/benelabs/crucible/issues/1152)) ([#1348](https://github.com/benelabs/crucible/issues/1348)) ([98ecdb5](https://github.com/benelabs/crucible/commit/98ecdb52e99fca6412d54626d4cc2bd68f670620))
+
+## [1.36.8](https://github.com/benelabs/crucible/compare/v1.36.7...v1.36.8) (2026-10-23)
+
+### Bug Fixes
+
+* **admin:** invalidate sessions, blacklist tokens, and broadcast revocation on user suspension ([#1150](https://github.com/benelabs/crucible/issues/1150)) ([#1347](https://github.com/benelabs/crucible/issues/1347)) ([434b450](https://github.com/benelabs/crucible/commit/434b4507a6670e3b7f4c6551002edc164c498079))
+
+## [1.36.7](https://github.com/benelabs/crucible/compare/v1.36.6...v1.36.7) (2026-10-23)
+
+### Bug Fixes
+
+* **sandbox:** enforce CPU instruction fuel metering and map fuel exhaustion ([#1138](https://github.com/benelabs/crucible/issues/1138)) ([#1343](https://github.com/benelabs/crucible/issues/1343)) ([db171fb](https://github.com/benelabs/crucible/commit/db171fbd80d0ecaf2be1749ddfb3554034c4efcc))
+* **webhook:** protect against DNS rebinding SSRF via public IP pinning and explicit Host header ([#1182](https://github.com/benelabs/crucible/issues/1182)) ([#1345](https://github.com/benelabs/crucible/issues/1345)) ([b7becd9](https://github.com/benelabs/crucible/commit/b7becd9436e1f2ea03726209ffe36518cbc66b66))
+
+## [1.36.6](https://github.com/benelabs/crucible/compare/v1.36.5...v1.36.6) (2026-10-23)
+
+### Bug Fixes
+
+* **idempotency:** atomically update record from processing to completed ([#1165](https://github.com/benelabs/crucible/issues/1165)) ([#1342](https://github.com/benelabs/crucible/issues/1342)) ([6b5785e](https://github.com/benelabs/crucible/commit/6b5785e0a7b85de329a8d78d552fddc3fbd20ab8))
+
+## [1.36.5](https://github.com/benelabs/crucible/compare/v1.36.4...v1.36.5) (2026-10-23)
+
+### Bug Fixes
+
+* **deploy-health:** incorporate worker queue backlog and lag into deploy health probe ([#1158](https://github.com/benelabs/crucible/issues/1158)) ([#1340](https://github.com/benelabs/crucible/issues/1340)) ([ddaae3d](https://github.com/benelabs/crucible/commit/ddaae3d91beee29484242d5a7a53302b19e5f4cd))
+
+## [1.36.4](https://github.com/benelabs/crucible/compare/v1.36.3...v1.36.4) (2026-10-23)
+
+### Bug Fixes
+
+* **coverage:** add composite index on contract test coverage historical records ([#1156](https://github.com/benelabs/crucible/issues/1156)) ([#1339](https://github.com/benelabs/crucible/issues/1339)) ([092170e](https://github.com/benelabs/crucible/commit/092170e4ce88249cd367cfc5a86456f27429d01c))
+
+## [1.36.3](https://github.com/benelabs/crucible/compare/v1.36.2...v1.36.3) (2026-10-23)
+
+### Bug Fixes
+
+* Address 4 critical security and performance issues ([#1282](https://github.com/benelabs/crucible/issues/1282)) ([aed15f0](https://github.com/benelabs/crucible/commit/aed15f067e0b60b173931a3afc4e5895dde41345)), closes [#1164](https://github.com/benelabs/crucible/issues/1164) [#1157](https://github.com/benelabs/crucible/issues/1157) [#1174](https://github.com/benelabs/crucible/issues/1174) [#1175](https://github.com/benelabs/crucible/issues/1175) [#1164](https://github.com/benelabs/crucible/issues/1164) [#1157](https://github.com/benelabs/crucible/issues/1157) [#1174](https://github.com/benelabs/crucible/issues/1174) [#1175](https://github.com/benelabs/crucible/issues/1175)
+* Address 4 critical security vulnerabilities ([#1227](https://github.com/benelabs/crucible/issues/1227), [#1228](https://github.com/benelabs/crucible/issues/1228), [#1229](https://github.com/benelabs/crucible/issues/1229), [#1230](https://github.com/benelabs/crucible/issues/1230)) ([#1328](https://github.com/benelabs/crucible/issues/1328)) ([b53a6ba](https://github.com/benelabs/crucible/commit/b53a6ba42b9009bdd63b7daa4720dd1127f32834)), closes [#1164](https://github.com/benelabs/crucible/issues/1164) [#1157](https://github.com/benelabs/crucible/issues/1157) [#1174](https://github.com/benelabs/crucible/issues/1174) [#1175](https://github.com/benelabs/crucible/issues/1175) [#1164](https://github.com/benelabs/crucible/issues/1164) [#1157](https://github.com/benelabs/crucible/issues/1157) [#1174](https://github.com/benelabs/crucible/issues/1174) [#1175](https://github.com/benelabs/crucible/issues/1175)
+* **admin:** wrap role elevation operations in database transaction with immutable audit logging ([#1149](https://github.com/benelabs/crucible/issues/1149)) ([#1335](https://github.com/benelabs/crucible/issues/1335)) ([f9148ec](https://github.com/benelabs/crucible/commit/f9148ecf11e9c1f0c055244a54921f0c33dc1b2c))
+* **alerts:** enforce service token and HMAC authentication with anti-DoS payload limiting ([#1151](https://github.com/benelabs/crucible/issues/1151)) ([#1337](https://github.com/benelabs/crucible/issues/1337)) ([0e6d5e9](https://github.com/benelabs/crucible/commit/0e6d5e905e3d5d3588601b3ff51120aeaed3f8ef))
+* **alerts:** pre-compile regex with regexset and evaluate logs asynchronously ([#1233](https://github.com/benelabs/crucible/issues/1233)) ([#1294](https://github.com/benelabs/crucible/issues/1294)) ([2c93e1b](https://github.com/benelabs/crucible/commit/2c93e1bf220cdf3afcc3a42a449c21a9cfe5cdab))
+* **analytics:** compute percentile latencies using PostgreSQL percentile_cont and t-digest ([#1221](https://github.com/benelabs/crucible/issues/1221)) ([#1306](https://github.com/benelabs/crucible/issues/1306)) ([a589fd6](https://github.com/benelabs/crucible/commit/a589fd6165a2e39979f4cc06f23f904ce4828433))
+* **analytics:** pre-aggregated hourly and daily rollups for historical contract activity ([#1222](https://github.com/benelabs/crucible/issues/1222)) ([#1307](https://github.com/benelabs/crucible/issues/1307)) ([c3c64ab](https://github.com/benelabs/crucible/commit/c3c64ab37a1b77f4be2c525c4fefbb2b6179a18a))
+* **backup:** isolate database credentials using temporary pgpass file for pg_dump ([#1257](https://github.com/benelabs/crucible/issues/1257)) ([#1360](https://github.com/benelabs/crucible/issues/1360)) ([e3ad939](https://github.com/benelabs/crucible/commit/e3ad9391d16ec38d182c7bda483c35f3b7b25ce6))
+* **benchmark:** guard aggregate calculations against empty samples and division by zero ([#1213](https://github.com/benelabs/crucible/issues/1213)) ([#1311](https://github.com/benelabs/crucible/issues/1311)) ([452b345](https://github.com/benelabs/crucible/commit/452b34512abdc6e548baed0fb7b9eb82c1982c42))
+* **benchmark:** persist benchmark runs and baselines to postgresql ([#1212](https://github.com/benelabs/crucible/issues/1212)) ([#1310](https://github.com/benelabs/crucible/issues/1310)) ([89f570f](https://github.com/benelabs/crucible/commit/89f570f20c6de9b55b00beca2f78cf5380acbd16))
+* **ci:** inspect report status and exit with non-zero code on regressions ([#1258](https://github.com/benelabs/crucible/issues/1258)) ([#1355](https://github.com/benelabs/crucible/issues/1355)) ([c0c8bec](https://github.com/benelabs/crucible/commit/c0c8bec9b49f3a7757d4654e4f6e69497a1f039d))
+* **circuit_breaker:** implement sliding time window for failure counting ([#1170](https://github.com/benelabs/crucible/issues/1170)) ([#1203](https://github.com/benelabs/crucible/issues/1203)) ([f8d25cc](https://github.com/benelabs/crucible/commit/f8d25ccf6f2c32bb40f560a1ce6b2ce6bc71a681))
+* **circuit_breaker:** restrict HalfOpen state to single in-flight canary probe ([#1169](https://github.com/benelabs/crucible/issues/1169)) ([#1193](https://github.com/benelabs/crucible/issues/1193)) ([b63a2ad](https://github.com/benelabs/crucible/commit/b63a2adedf2df77f1b5c25e4b7a23dc007e7ae14))
+* **contracts:** verify soroban wasm bytecode against deprecated host function table ([#1176](https://github.com/benelabs/crucible/issues/1176)) ([#1351](https://github.com/benelabs/crucible/issues/1351)) ([ca5dcd8](https://github.com/benelabs/crucible/commit/ca5dcd896c34fd4db8f49336ea5eb012075630a4))
+* **cors:** reject wildcard allow_origin with allow_credentials across all environments ([#1246](https://github.com/benelabs/crucible/issues/1246)) ([#1281](https://github.com/benelabs/crucible/issues/1281)) ([a643ce0](https://github.com/benelabs/crucible/commit/a643ce0feb934c97f48f8080a8a5552cf445b917))
+* **coverage:** sanitize LCOV source paths to prevent directory traversal ([#1155](https://github.com/benelabs/crucible/issues/1155)) ([#1264](https://github.com/benelabs/crucible/issues/1264)) ([b7864e5](https://github.com/benelabs/crucible/commit/b7864e5bda45b85b2a6045d5a9c85ba4a88b2b65))
+* **coverage:** track macro expansions and map synthetic spans to prevent 0% line coverage ([#1237](https://github.com/benelabs/crucible/issues/1237)) ([#1362](https://github.com/benelabs/crucible/issues/1362)) ([8b8da04](https://github.com/benelabs/crucible/commit/8b8da04e817846c7cbac438649df96fa112d2791))
+* **dashboard:** eliminate N+1 queries with batched contract stats aggregation ([#1147](https://github.com/benelabs/crucible/issues/1147)) ([#1333](https://github.com/benelabs/crucible/issues/1333)) ([5e51b24](https://github.com/benelabs/crucible/commit/5e51b244505fade1fc22434ffe823bf3a2b1de65))
+* **dashboard:** prevent cache stampede with XFetch early expiration and mutex locking ([#1148](https://github.com/benelabs/crucible/issues/1148)) ([#1334](https://github.com/benelabs/crucible/issues/1334)) ([f55a790](https://github.com/benelabs/crucible/commit/f55a7908c748fd0309350e79745ce6895fbf7d2e))
+* **db:** bound database connection acquire timeout to prevent request stalls ([#1247](https://github.com/benelabs/crucible/issues/1247)) ([#1288](https://github.com/benelabs/crucible/issues/1288)) ([f365a58](https://github.com/benelabs/crucible/commit/f365a58ac6f458c21647d981f308517d3c14fd07))
+* **db:** configure tcp keepalive on postgresql connection pool ([#1248](https://github.com/benelabs/crucible/issues/1248)) ([#1286](https://github.com/benelabs/crucible/issues/1286)) ([886b0fc](https://github.com/benelabs/crucible/commit/886b0fc28b9828559cfa7549fd269ee83e56fca1))
+* **dedup:** extend build locks with heartbeat and dependency-proportional ttl ([#1225](https://github.com/benelabs/crucible/issues/1225)) ([#1299](https://github.com/benelabs/crucible/issues/1299)) ([50a9bf3](https://github.com/benelabs/crucible/commit/50a9bf3f88a94c5f2873ae13735bc6231ff4f339))
+* **distributed_lock:** trigger CancellationToken on heartbeat quorum loss ([#1171](https://github.com/benelabs/crucible/issues/1171)) ([#1194](https://github.com/benelabs/crucible/issues/1194)) ([db0e605](https://github.com/benelabs/crucible/commit/db0e6058e0ef40ef7ed882d57e6eac3ca8533954))
+* **docs:** recursive type AST visitor for nested tuple returns and enums ([#1226](https://github.com/benelabs/crucible/issues/1226)) ([#1298](https://github.com/benelabs/crucible/issues/1298)) ([4d1043b](https://github.com/benelabs/crucible/commit/4d1043bf7b8d7565d7cc4a45d29c05df3063427e))
+* **logging:** automated partitioning and TTL retention for contract call logs ([#1217](https://github.com/benelabs/crucible/issues/1217)) ([#1305](https://github.com/benelabs/crucible/issues/1305)) ([4bffb17](https://github.com/benelabs/crucible/commit/4bffb17813683093ac611473a7164abe79644519))
+* **logging:** increase channel capacity and track dropped logs metric ([#1232](https://github.com/benelabs/crucible/issues/1232)) ([#1295](https://github.com/benelabs/crucible/issues/1295)) ([0e2bdfc](https://github.com/benelabs/crucible/commit/0e2bdfc2e52047a24d91fcdaee1028cd6215142a))
+* **metrics:** maintain singleton hardware probe manager to prevent re-initialization on every scrape ([#1236](https://github.com/benelabs/crucible/issues/1236)) ([#1363](https://github.com/benelabs/crucible/issues/1363)) ([061a337](https://github.com/benelabs/crucible/commit/061a3374cf7a93a68db2e3415532d675d6ef1bae))
+* **metrics:** normalize route paths to prevent cardinality explosion in http metrics ([#1231](https://github.com/benelabs/crucible/issues/1231)) ([#1296](https://github.com/benelabs/crucible/issues/1296)) ([0e23111](https://github.com/benelabs/crucible/commit/0e231110178839da267e1255890f8333c7369c77))
+* **metrics:** upgrade cumulative metrics counters to Decimal and saturating u128 arithmetic ([#1223](https://github.com/benelabs/crucible/issues/1223)) ([#1313](https://github.com/benelabs/crucible/issues/1313)) ([c355270](https://github.com/benelabs/crucible/commit/c3552704ba3eb64adaa09250a4876da2176d2dcf))
+* **middleware:** enforce tenant isolation in bitmask permission checks ([#1163](https://github.com/benelabs/crucible/issues/1163)) ([#1263](https://github.com/benelabs/crucible/issues/1263)) ([448e5ee](https://github.com/benelabs/crucible/commit/448e5ee3e7860860598060afc2a23436e4a80af3))
+* **monitor:** eliminate scheduling drift with tokio interval MissedTickBehavior::Skip ([#1219](https://github.com/benelabs/crucible/issues/1219)) ([#1312](https://github.com/benelabs/crucible/issues/1312)) ([4e6d15f](https://github.com/benelabs/crucible/commit/4e6d15fc26de9c6acc0284803d64dfd603a2bfe3))
+* **redis:** add exponential retry and startup timeout to Redis connection manager (fixes [#1249](https://github.com/benelabs/crucible/issues/1249)) ([#1269](https://github.com/benelabs/crucible/issues/1269)) ([323f490](https://github.com/benelabs/crucible/commit/323f490419d394d314d0912f389040c03a6e5ad0))
+* **redis:** verify loading and read-only replica state during health checks ([#1256](https://github.com/benelabs/crucible/issues/1256)) ([#1284](https://github.com/benelabs/crucible/issues/1284)) ([bbb3b02](https://github.com/benelabs/crucible/commit/bbb3b02e60aabf7605b4980b2fd107486f336f83))
+* **sandbox:** enforce recursion depth limits on XDR arguments ([#1140](https://github.com/benelabs/crucible/issues/1140)) ([#1315](https://github.com/benelabs/crucible/issues/1315)) ([31a8465](https://github.com/benelabs/crucible/commit/31a846501399123c22796744f6ea69c7ea32e1f7))
+* **sandbox:** enforce validation bounds on simulated ledger sequence and timestamp ([#1139](https://github.com/benelabs/crucible/issues/1139)) ([#1314](https://github.com/benelabs/crucible/issues/1314)) ([e10261a](https://github.com/benelabs/crucible/commit/e10261a07a78aff9ce196d50e8bd5045efe4c721))
+* **sandbox:** prevent blocking thread pool starvation on timeout ([#1137](https://github.com/benelabs/crucible/issues/1137)) ([#1265](https://github.com/benelabs/crucible/issues/1265)) ([aea1134](https://github.com/benelabs/crucible/commit/aea113435ad6e4ea0b45edd7d32368ea3f1b404a))
+* **sanitize:** strip unicode bidirectional overrides and zero-width characters in input sanitizer ([#1254](https://github.com/benelabs/crucible/issues/1254)) ([#1359](https://github.com/benelabs/crucible/issues/1359)) ([c33cfdd](https://github.com/benelabs/crucible/commit/c33cfdd4c33eedb82b135d7aa8ca1bdf2e694f54))
+* **scanner:** AST-scoped vulnerability inspection using syn ([#1210](https://github.com/benelabs/crucible/issues/1210)) ([#1308](https://github.com/benelabs/crucible/issues/1308)) ([4cc6784](https://github.com/benelabs/crucible/commit/4cc67843c21ba591027c5187223c7822cf04a496))
+* **scanner:** extract and report accurate source line numbers ([#1211](https://github.com/benelabs/crucible/issues/1211)) ([#1309](https://github.com/benelabs/crucible/issues/1309)) ([d1e4bf7](https://github.com/benelabs/crucible/commit/d1e4bf7f3c7be6502d995ec9935fc35fb5efec58))
+* **scheduler:** catch up missed scheduled jobs during leader failover ([#1184](https://github.com/benelabs/crucible/issues/1184)) ([#1353](https://github.com/benelabs/crucible/issues/1353)) ([f49187b](https://github.com/benelabs/crucible/commit/f49187bba23afb08edbcca5e3df2ab3db93b3412))
+* **security_scanner:** validate wasm section header offsets and payload bounds ([#1235](https://github.com/benelabs/crucible/issues/1235)) ([#1279](https://github.com/benelabs/crucible/issues/1279)) ([f137fd5](https://github.com/benelabs/crucible/commit/f137fd5fdade987a8b8440540e6f9986ab8a93b9))
+* **server:** bound HTTP/2 max concurrent streams to mitigate Rapid Reset (fixes [#1250](https://github.com/benelabs/crucible/issues/1250)) ([#1268](https://github.com/benelabs/crucible/issues/1268)) ([7738a43](https://github.com/benelabs/crucible/commit/7738a438fccd34dc8cd4526489ec787eb5e85804))
+* **server:** drain background worker jobs gracefully before closing db pool (fixes [#1251](https://github.com/benelabs/crucible/issues/1251)) ([#1267](https://github.com/benelabs/crucible/issues/1267)) ([c57bf0b](https://github.com/benelabs/crucible/commit/c57bf0bb7d0b4fa70b56871de8fde6ee64b1196e))
+* **services:** buffer contract call logs in bounded channel with async batch flushing ([#1216](https://github.com/benelabs/crucible/issues/1216)) ([#1277](https://github.com/benelabs/crucible/issues/1277)) ([602ede7](https://github.com/benelabs/crucible/commit/602ede74b8fe81d630ca209cd0c204e1c241540a))
+* **services:** enforce 3-second timeout and manual review queue in compliance service ([#1224](https://github.com/benelabs/crucible/issues/1224)) ([#1273](https://github.com/benelabs/crucible/issues/1273)) ([e1f436b](https://github.com/benelabs/crucible/commit/e1f436b245502cbb8784887744e18f294e603034))
+* **services:** enforce ownership and admin authorization on contract registry records ([#1218](https://github.com/benelabs/crucible/issues/1218)) ([#1276](https://github.com/benelabs/crucible/issues/1276)) ([3a2fbed](https://github.com/benelabs/crucible/commit/3a2fbed7352b76885dbe3703366569f44cef2d79))
+* **services:** replace naive bytecode matching with wasmparser AST inspection ([#1209](https://github.com/benelabs/crucible/issues/1209)) ([#1278](https://github.com/benelabs/crucible/issues/1278)) ([cf2be5f](https://github.com/benelabs/crucible/commit/cf2be5fe44274138f7a7301675de241a16a893d6))
+* **services:** restore contract temporary and persistent storage on rollback ([#1234](https://github.com/benelabs/crucible/issues/1234)) ([#1272](https://github.com/benelabs/crucible/issues/1272)) ([d94dff0](https://github.com/benelabs/crucible/commit/d94dff09b9dbd4f23a26230d073403e8739a6155))
+* **stellar:** add transaction memo support and validation to faucet dispenser ([#1146](https://github.com/benelabs/crucible/issues/1146)) ([#1202](https://github.com/benelabs/crucible/issues/1202)) ([b176fe0](https://github.com/benelabs/crucible/commit/b176fe03745b2fed124288c58ccbc061759c4bad))
+* **stellar:** migrate faucet rate limiter to centralized Redis sliding window ([#1144](https://github.com/benelabs/crucible/issues/1144)) ([#1319](https://github.com/benelabs/crucible/issues/1319)) ([774ff6d](https://github.com/benelabs/crucible/commit/774ff6d31db2f928176c6aa69bcc6a331f3c8489))
+* **storage:** dynamic storage rent estimation via ledger config ([#1214](https://github.com/benelabs/crucible/issues/1214)) ([#1304](https://github.com/benelabs/crucible/issues/1304)) ([9fa24ac](https://github.com/benelabs/crucible/commit/9fa24ac46cb75693a5e2af1a476d43233edbc647))
+* **storage:** serialize DataKeys to canonical base64 XDR in storage diffs ([#1215](https://github.com/benelabs/crucible/issues/1215)) ([#1303](https://github.com/benelabs/crucible/issues/1303)) ([312f553](https://github.com/benelabs/crucible/commit/312f553727ef95a0e4cb36e2e014c0fdcbbaf1df))
+* **test_results:** add cryptographic checksum and witness receipt validation ([#1220](https://github.com/benelabs/crucible/issues/1220)) ([#1301](https://github.com/benelabs/crucible/issues/1301)) ([73c49fc](https://github.com/benelabs/crucible/commit/73c49fcfc45180d79550f65a2bb9a20c2f966fc7))
+* **tracing:** implement persistent disk buffer fallback for telemetry spans during outages ([#1238](https://github.com/benelabs/crucible/issues/1238)) ([#1358](https://github.com/benelabs/crucible/issues/1358)) ([0f994e8](https://github.com/benelabs/crucible/commit/0f994e820d793f74a4590dd22a90618d9890bb20))
+* **vault:** renew the client token in the background so it cannot silently expire ([#1252](https://github.com/benelabs/crucible/issues/1252)) ([#1291](https://github.com/benelabs/crucible/issues/1291)) ([bf3d96b](https://github.com/benelabs/crucible/commit/bf3d96b7be65316b8eee3691fd870624ef37dd2c))
+* **workers:** add randomized jitter to bulk dlq replay to prevent retry waves ([#1245](https://github.com/benelabs/crucible/issues/1245)) ([#1283](https://github.com/benelabs/crucible/issues/1283)) ([d48b384](https://github.com/benelabs/crucible/commit/d48b3843ba4eafab6380c128efb890c7483c87b9))
+* **workers:** catch panics, preserve diagnostic traces and permit release in TaskExecutor (fixes [#1239](https://github.com/benelabs/crucible/issues/1239)) ([#1271](https://github.com/benelabs/crucible/issues/1271)) ([766c5db](https://github.com/benelabs/crucible/commit/766c5dbd2e2fcd9823a72a9b51312994f790a0a3))
+* **workers:** emit explicit phase transition events regardless of percentage progress ([#1244](https://github.com/benelabs/crucible/issues/1244)) ([#1357](https://github.com/benelabs/crucible/issues/1357)) ([48ab9b5](https://github.com/benelabs/crucible/commit/48ab9b55ed6e7734029c8a0a72eb1ef7c3c0aa71))
+* **workers:** enforce per-task timeout deadline in TaskExecutor (fixes [#1240](https://github.com/benelabs/crucible/issues/1240)) ([#1270](https://github.com/benelabs/crucible/issues/1270)) ([b52491b](https://github.com/benelabs/crucible/commit/b52491b8829f8682b553610136364888bf401952))
+* **workers:** implement cursor-based keyset pagination in contract cache pre-warming ([#1241](https://github.com/benelabs/crucible/issues/1241)) ([#1292](https://github.com/benelabs/crucible/issues/1292)) ([13bd88d](https://github.com/benelabs/crucible/commit/13bd88d41c58ecf35b785f597cb28016f28665cc))
+* **workers:** implement weighted fair queuing in priority scheduler to prevent starvation ([#1243](https://github.com/benelabs/crucible/issues/1243)) ([#1289](https://github.com/benelabs/crucible/issues/1289)) ([d157708](https://github.com/benelabs/crucible/commit/d157708c9e46af303c11602ea47664b38fc834ef))
+* **workers:** prune expired job runs in bounded batches to prevent table lock contention ([#1242](https://github.com/benelabs/crucible/issues/1242)) ([#1290](https://github.com/benelabs/crucible/issues/1290)) ([7e636b6](https://github.com/benelabs/crucible/commit/7e636b692161b71ccfcf60da0582a9885dee2f86))
+* **ws:** enforce outbound buffer limit and slow consumer backpressure ([#1143](https://github.com/benelabs/crucible/issues/1143)) ([#1318](https://github.com/benelabs/crucible/issues/1318)) ([e99e7e2](https://github.com/benelabs/crucible/commit/e99e7e23d4c3c23bd840272cb990b1758a61ce7d))
+* **ws:** require authentication during websocket handshake upgrade ([#1141](https://github.com/benelabs/crucible/issues/1141)) ([#1316](https://github.com/benelabs/crucible/issues/1316)) ([8586029](https://github.com/benelabs/crucible/commit/85860290faef740a06a13f86afaa3299a2026ef1))
+
+## [1.36.2](https://github.com/benelabs/crucible/compare/v1.36.1...v1.36.2) (2026-10-23)
+
+### Bug Fixes
+
+* **auth:** gracefully extract bearer tokens and return RFC 7807 problem details ([#1162](https://github.com/benelabs/crucible/issues/1162)) ([#1204](https://github.com/benelabs/crucible/issues/1204)) ([8b3a7f1](https://github.com/benelabs/crucible/commit/8b3a7f103504b3edd17b90ffbf77f27c16b6a280))
+* **contracts:** enforce cycle detection and 16-layer recursion depth limit on dependency analysis ([#1154](https://github.com/benelabs/crucible/issues/1154)) ([#1206](https://github.com/benelabs/crucible/issues/1206)) ([7746f10](https://github.com/benelabs/crucible/commit/7746f10c7ddab8a87221a3adc732745460d396a2))
+* **db:** ensure database seed queries handle all unique key conflicts idempotently ([#1255](https://github.com/benelabs/crucible/issues/1255)) ([#1261](https://github.com/benelabs/crucible/issues/1261)) ([8cd5295](https://github.com/benelabs/crucible/commit/8cd5295077f86bf6ae39f77082729acc86e07e4d))
+* **feature_flags:** implement atomic in-memory cache and safe Redis outage fallback ([#1180](https://github.com/benelabs/crucible/issues/1180)) ([#1197](https://github.com/benelabs/crucible/issues/1197)) ([b50e647](https://github.com/benelabs/crucible/commit/b50e647171923f56f50ab6f262278b40e421f2c3))
+* **gas_optimizer:** include storage footprint estimates and rent balance projections ([#1159](https://github.com/benelabs/crucible/issues/1159)) ([#1208](https://github.com/benelabs/crucible/issues/1208)) ([e536e46](https://github.com/benelabs/crucible/commit/e536e46927a59e7db308656929f494842af9e4f2))
+* **graphql:** configure query depth limit (max 6) and complexity caps ([#1160](https://github.com/benelabs/crucible/issues/1160)) ([#1207](https://github.com/benelabs/crucible/issues/1207)) ([0559780](https://github.com/benelabs/crucible/commit/05597801cdeaa09fde8ddaef5de66e8bff982d67))
+* **idempotency:** implement atomic key reservation using SET NX PX ([#1166](https://github.com/benelabs/crucible/issues/1166)) ([#1201](https://github.com/benelabs/crucible/issues/1201)) ([d07c071](https://github.com/benelabs/crucible/commit/d07c071328225b42888c173d1f498d0c88add0ae))
+* resolve event ingestion reorg reconciliation redlock drift and dlq quarantine ([#1259](https://github.com/benelabs/crucible/issues/1259)) ([acd5e99](https://github.com/benelabs/crucible/commit/acd5e9916a5365cb3befb8d89b179454f627dc85))
+
+## [1.36.1](https://github.com/benelabs/crucible/compare/v1.36.0...v1.36.1) (2026-10-23)
+
+### Bug Fixes
+
+* **auth:** enforce JWT issuer and audience verification ([#1161](https://github.com/benelabs/crucible/issues/1161)) ([#1187](https://github.com/benelabs/crucible/issues/1187)) ([78d9c7d](https://github.com/benelabs/crucible/commit/78d9c7d236f3252c8a3a089c6adcabfb5a7df3f4))
+* **crucible-macros:** normalize fixture paths for cycle detection and preserve parse errors ([#1134](https://github.com/benelabs/crucible/issues/1134)) ([21bb2f9](https://github.com/benelabs/crucible/commit/21bb2f91a165268c91edd78cc2372119d6ca8dd3))
+* **insurance:** invoke reentrancy guard in state-mutating methods ([#1084](https://github.com/benelabs/crucible/issues/1084)) ([#1132](https://github.com/benelabs/crucible/issues/1132)) ([e5fdca1](https://github.com/benelabs/crucible/commit/e5fdca199c35ba22e1f6476338679c41db710353))
+* **logging:** redact sensitive credentials and query parameters in HTTP logs ([#1167](https://github.com/benelabs/crucible/issues/1167)) ([#1190](https://github.com/benelabs/crucible/issues/1190)) ([71f2626](https://github.com/benelabs/crucible/commit/71f2626d40159bf1eeb167a552db083a38ee5cfd))
+* **middleware:** enforce strict Content-Type validation and handle media parameters ([#1168](https://github.com/benelabs/crucible/issues/1168)) ([#1188](https://github.com/benelabs/crucible/issues/1188)) ([08055b5](https://github.com/benelabs/crucible/commit/08055b508a764cc60b2d9d83e5f15e17c33e0cbf))
+* **stellar:** evict expired IP and account keys in faucet rate limiter ([#1145](https://github.com/benelabs/crucible/issues/1145)) ([#1196](https://github.com/benelabs/crucible/issues/1196)) ([af160e9](https://github.com/benelabs/crucible/commit/af160e95dfcaf330cceca6d2cd3562e0162de2a4))
+* **storage_size:** replace unsafe pointer cast with StorageSize trait ([#1135](https://github.com/benelabs/crucible/issues/1135)) ([c9219f3](https://github.com/benelabs/crucible/commit/c9219f3bef546f03704a2f4adbe1440189efa3ab))
+* **versioning:** conform SemVer ordering parser to ignore build metadata ([#1177](https://github.com/benelabs/crucible/issues/1177)) ([#1191](https://github.com/benelabs/crucible/issues/1191)) ([55ec6d6](https://github.com/benelabs/crucible/commit/55ec6d64c1071742bd0e74b9a39a9da5521246a6))
+* **webhook:** enforce minimum backoff floor in jitter calculation ([#1181](https://github.com/benelabs/crucible/issues/1181)) ([#1189](https://github.com/benelabs/crucible/issues/1189)) ([99ccf5b](https://github.com/benelabs/crucible/commit/99ccf5b3f0a5bb638efdaa8c1b34386da74f95fb))
+* **ws:** enforce pong heartbeat deadline on websocket connection stream ([#1142](https://github.com/benelabs/crucible/issues/1142)) ([#1195](https://github.com/benelabs/crucible/issues/1195)) ([0da96d2](https://github.com/benelabs/crucible/commit/0da96d2d3b1b4e3cc8842bf7546ee55a460ff6a4))
+
+## [1.36.0](https://github.com/benelabs/crucible/compare/v1.35.0...v1.36.0) (2026-10-23)
+
+### Features
+
+* **backend:** connection acquire timeout, tcp keepalive, redis startup retry, and http2 stream limits ([#1247](https://github.com/benelabs/crucible/issues/1247), [#1248](https://github.com/benelabs/crucible/issues/1248), [#1249](https://github.com/benelabs/crucible/issues/1249), [#1250](https://github.com/benelabs/crucible/issues/1250)) ([0a37c8f](https://github.com/benelabs/crucible/commit/0a37c8f4bf2f55a76e5ee506407b6fa7101a1fa8))
+
 ## [1.35.0](https://github.com/benelabs/crucible/compare/v1.34.2...v1.35.0) (2026-10-22)
 
 ### Features

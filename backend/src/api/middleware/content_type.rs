@@ -22,6 +22,8 @@ const BODYLESS_MUTATION_ROUTES: [&str; 2] = ["/api/config/reload", "/api/v1/auth
 ///
 /// Returns `415 Unsupported Media Type` if the Content-Type is missing, malformed, or
 /// does not evaluate to `application/json`.
+/// Returns `415 Unsupported Media Type` if the Content-Type is missing or
+/// the parsed primary media type does not match `application/json`.
 pub async fn require_json_content_type(req: Request, next: Next) -> Result<Response, AppError> {
     let method = req.method();
     if method == Method::GET || method == Method::HEAD || method == Method::OPTIONS {
@@ -41,6 +43,7 @@ pub async fn require_json_content_type(req: Request, next: Next) -> Result<Respo
         .unwrap_or(false);
 
     if is_json {
+    if is_json_content_type(content_type) {
         Ok(next.run(req).await)
     } else {
         Err(AppError::UnsupportedMediaType(
@@ -248,5 +251,38 @@ mod tests {
             let res = app.clone().oneshot(req).await.unwrap();
             assert_eq!(res.status(), StatusCode::OK, "route {path}");
         }
+/// Helper to validate if a Content-Type header string represents `application/json`.
+/// Splits off any optional parameters (e.g. `; charset=utf-8`) and checks primary media type case-insensitively.
+pub fn is_json_content_type(header_val: &str) -> bool {
+    let media_type = header_val.split(';').next().unwrap_or("").trim();
+    media_type.eq_ignore_ascii_case("application/json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_json_content_type_valid() {
+        assert!(is_json_content_type("application/json"));
+        assert!(is_json_content_type("application/json; charset=utf-8"));
+        assert!(is_json_content_type("application/json;charset=utf-8"));
+        assert!(is_json_content_type("APPLICATION/JSON"));
+        assert!(is_json_content_type("APPLICATION/JSON; charset=utf-8"));
+        assert!(is_json_content_type("  application/json  ; boundary=something "));
+    }
+
+    #[test]
+    fn test_is_json_content_type_invalid_and_bypass_prevention() {
+        // Bypass attempts that starts_with would incorrectly accept
+        assert!(!is_json_content_type("application/json_evil"));
+        assert!(!is_json_content_type("application/json5"));
+        assert!(!is_json_content_type("application/json-patch+json"));
+
+        // Other content types
+        assert!(!is_json_content_type("text/plain"));
+        assert!(!is_json_content_type("application/xml"));
+        assert!(!is_json_content_type("multipart/form-data"));
+        assert!(!is_json_content_type(""));
     }
 }

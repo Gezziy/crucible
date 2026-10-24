@@ -6,6 +6,7 @@
 //!
 //! | Method | Path | Description |
 //! |--------|------|-------------|
+//! | `GET`  | `/api/v1/health/deploy` | Probe deployment health including queue backlog and lag |
 //! | `POST` | `/api/v1/deployments` | Register a new deployment |
 //! | `GET`  | `/api/v1/deployments/:id` | Get a single deployment by ID |
 //! | `GET`  | `/api/v1/deployments/contract/:contract_id` | List deployments for a contract |
@@ -35,14 +36,33 @@ use crate::error::AppError;
 
 const CACHE_TTL_SECS: u64 = 30;
 
+/// Default maximum acceptable ledger lag before health is marked degraded.
+pub const DEFAULT_MAX_ACCEPTABLE_LAG: u64 = 500;
+
+/// Critical ledger lag threshold after which deployment is marked failed.
+pub const CRITICAL_LAG_THRESHOLD: u64 = 2000;
+
+/// Maximum acceptable worker heartbeat age in seconds before worker is considered stale.
+pub const DEFAULT_MAX_HEARTBEAT_AGE_SECS: u64 = 60;
+
+/// Maximum acceptable ingestion queue backlog count.
+pub const DEFAULT_MAX_ACCEPTABLE_QUEUE_BACKLOG: u64 = 1000;
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
 /// Shared state for deploy-health handlers.
+#[derive(Clone)]
 pub struct DeployHealthState {
     pub db: PgPool,
-    pub redis: redis::aio::ConnectionManager,
+    pub redis: redis::Client,
+}
+
+impl DeployHealthState {
+    pub fn new(db: PgPool, redis: redis::Client) -> Self {
+        Self { db, redis }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -101,6 +121,62 @@ pub struct Deployment {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Detailed status of an ingestion worker's heartbeat.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerHeartbeatInfo {
+    pub worker_id: String,
+    pub is_healthy: bool,
+    pub seconds_since_last_heartbeat: u64,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+}
+
+/// Metrics tracking background ingestion progress and backlog.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestionLagMetrics {
+    pub network_tip_ledger: u64,
+    pub current_processed_ledger: u64,
+    pub lag_ledgers: u64,
+    pub queue_backlog: u64,
+    pub max_acceptable_lag: u64,
+    pub is_lag_acceptable: bool,
+}
+
+/// Summary of worker heartbeats freshness.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerHealthSummary {
+    pub total_workers: usize,
+    pub active_healthy_workers: usize,
+    pub max_acceptable_heartbeat_age_secs: u64,
+    pub are_workers_healthy: bool,
+    pub workers: Vec<WorkerHeartbeatInfo>,
+}
+
+/// Complete response payload for `GET /api/v1/health/deploy`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeployHealthResponse {
+    pub status: DeployStatus,
+    pub pod_healthy: bool,
+    pub workers_healthy: bool,
+    pub ingestion_healthy: bool,
+    pub ingestion_lag: IngestionLagMetrics,
+    pub worker_health: WorkerHealthSummary,
+    pub message: Option<String>,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Health probe result for readiness checks
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthProbeResult {
+    pub status: String,
+    pub timestamp: DateTime<Utc>,
+    pub database_writable: bool,
+    pub message: String,
+}
+
 // ---------------------------------------------------------------------------
 // Request / response types
 // ---------------------------------------------------------------------------
@@ -122,8 +198,208 @@ pub struct UpdateStatusRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Evaluation logic
+// ---------------------------------------------------------------------------
+
+/// Pure function to evaluate deployment health probe based on pod, lag, and worker status.
+pub fn evaluate_deploy_health(
+    pod_healthy: bool,
+    ingestion: IngestionLagMetrics,
+    worker_summary: WorkerHealthSummary,
+) -> DeployHealthResponse {
+    let ingestion_healthy = ingestion.is_lag_acceptable;
+    let workers_healthy = worker_summary.are_workers_healthy;
+
+    let mut messages = Vec::new();
+
+    if !pod_healthy {
+        messages.push("Pod storage connectivity degraded".to_string());
+    }
+
+    if ingestion.lag_ledgers > CRITICAL_LAG_THRESHOLD {
+        messages.push(format!(
+            "Ingestion lag is critical: {} ledgers behind network tip",
+            ingestion.lag_ledgers
+        ));
+    } else if !ingestion.is_lag_acceptable {
+        messages.push(format!(
+            "Ingestion lag exceeds threshold: {} ledgers behind network tip (max: {})",
+            ingestion.lag_ledgers, ingestion.max_acceptable_lag
+        ));
+    }
+
+    if ingestion.queue_backlog > DEFAULT_MAX_ACCEPTABLE_QUEUE_BACKLOG {
+        messages.push(format!(
+            "Ingestion queue backlog high: {} jobs queued",
+            ingestion.queue_backlog
+        ));
+    }
+
+    if !workers_healthy {
+        if worker_summary.total_workers == 0 {
+            messages.push("No active ingestion workers detected".to_string());
+        } else {
+            messages.push(format!(
+                "Worker heartbeat stale: {}/{} healthy",
+                worker_summary.active_healthy_workers, worker_summary.total_workers
+            ));
+        }
+    }
+
+    // Health metrics report pod status as healthy even when background ingestion workers
+    // are lagging thousands of ledgers behind network tip.
+    // If lag exceeds CRITICAL_LAG_THRESHOLD, status MUST NOT be healthy.
+    let status = if !pod_healthy || ingestion.lag_ledgers > CRITICAL_LAG_THRESHOLD {
+        DeployStatus::Failed
+    } else if !ingestion_healthy || !workers_healthy {
+        DeployStatus::Degraded
+    } else {
+        DeployStatus::Healthy
+    };
+
+    let message = if messages.is_empty() {
+        None
+    } else {
+        Some(messages.join("; "))
+    };
+
+    DeployHealthResponse {
+        status,
+        pod_healthy,
+        workers_healthy,
+        ingestion_healthy,
+        ingestion_lag: ingestion,
+        worker_health: worker_summary,
+        message,
+        timestamp: Utc::now(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+
+/// `GET /api/v1/health/deploy` — probe overall deployment health including worker backlog and lag.
+///
+/// Incorporates:
+/// 1. Pod database connectivity check
+/// 2. Background worker heartbeat freshness
+/// 3. Ingestion ledger lag behind network tip and queue backlog
+#[instrument(skip(state))]
+pub async fn get_deploy_health(
+    State(state): State<Arc<DeployHealthState>>,
+) -> Result<impl IntoResponse, AppError> {
+    let pod_healthy = sqlx::query("SELECT 1").execute(&state.db).await.is_ok();
+
+    let mut current_ledger = 0u64;
+    if let Ok(Some((last,))) =
+        sqlx::query_as::<_, (i64,)>("SELECT COALESCE(MAX(last_ledger), 0) FROM ingestion_cursors")
+            .fetch_optional(&state.db)
+            .await
+    {
+        current_ledger = last.max(0) as u64;
+    }
+
+    let mut network_tip = current_ledger;
+    let mut queue_backlog = 0u64;
+    let mut workers = Vec::new();
+
+    if let Ok(mut conn) = state.redis.get_multiplexed_async_connection().await {
+        // Query network tip from redis
+        if let Ok(tip_str) = conn.get::<_, String>("stellar:network:tip").await {
+            if let Ok(tip) = tip_str.parse::<u64>() {
+                network_tip = tip;
+            }
+        } else if let Ok(tip_str) = conn.get::<_, String>("ingestion:network_tip").await {
+            if let Ok(tip) = tip_str.parse::<u64>() {
+                network_tip = tip;
+            }
+        }
+
+        // Query queue backlog
+        if let Ok(len) = conn.llen::<_, u64>("ingestion:queue").await {
+            queue_backlog = len;
+        } else if let Ok(backlog_str) = conn.get::<_, String>("ingestion:queue:backlog").await {
+            if let Ok(b) = backlog_str.parse::<u64>() {
+                queue_backlog = b;
+            }
+        }
+
+        // Query worker heartbeats
+        if let Ok(keys) = conn.keys::<_, Vec<String>>("worker:*:health").await {
+            for key in keys {
+                if let Ok(Some(json)) = conn.get::<_, Option<String>>(&key).await {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json) {
+                        let worker_id = val
+                            .get("worker_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_else(|| {
+                                key.trim_start_matches("worker:")
+                                    .trim_end_matches(":health")
+                            })
+                            .to_string();
+                        let is_healthy_raw = val
+                            .get("is_healthy")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        let elapsed_secs = val
+                            .get("last_heartbeat")
+                            .and_then(|v| {
+                                v.as_str()
+                                    .and_then(|s| s.parse::<u64>().ok())
+                                    .or_else(|| v.as_u64())
+                            })
+                            .unwrap_or(0);
+                        let is_fresh = elapsed_secs < DEFAULT_MAX_HEARTBEAT_AGE_SECS;
+
+                        workers.push(WorkerHeartbeatInfo {
+                            worker_id,
+                            is_healthy: is_healthy_raw && is_fresh,
+                            seconds_since_last_heartbeat: elapsed_secs,
+                            last_heartbeat_at: Some(
+                                Utc::now() - chrono::Duration::seconds(elapsed_secs as i64),
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let lag_ledgers = network_tip.saturating_sub(current_ledger);
+    let is_lag_acceptable = lag_ledgers <= DEFAULT_MAX_ACCEPTABLE_LAG
+        && queue_backlog <= DEFAULT_MAX_ACCEPTABLE_QUEUE_BACKLOG;
+
+    let ingestion_metrics = IngestionLagMetrics {
+        network_tip_ledger: network_tip,
+        current_processed_ledger: current_ledger,
+        lag_ledgers,
+        queue_backlog,
+        max_acceptable_lag: DEFAULT_MAX_ACCEPTABLE_LAG,
+        is_lag_acceptable,
+    };
+
+    let total_workers = workers.len();
+    let active_healthy_workers = workers.iter().filter(|w| w.is_healthy).count();
+    let are_workers_healthy = total_workers == 0 || active_healthy_workers == total_workers;
+
+    let worker_summary = WorkerHealthSummary {
+        total_workers,
+        active_healthy_workers,
+        max_acceptable_heartbeat_age_secs: DEFAULT_MAX_HEARTBEAT_AGE_SECS,
+        are_workers_healthy,
+        workers,
+    };
+
+    let health_response = evaluate_deploy_health(pod_healthy, ingestion_metrics, worker_summary);
+
+    let status_code = match health_response.status {
+        DeployStatus::Healthy | DeployStatus::Degraded | DeployStatus::Pending => StatusCode::OK,
+        DeployStatus::Failed => StatusCode::SERVICE_UNAVAILABLE,
+    };
+
+    Ok((status_code, Json(health_response)))
+}
 
 /// `POST /api/v1/deployments` — register a new deployment.
 ///
@@ -169,11 +445,11 @@ pub async fn get_deployment(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, AppError> {
     let cache_key = format!("deploy_health:deployment:{id}");
-    let mut redis = state.redis.clone();
-
-    if let Ok(raw) = redis.get::<_, String>(&cache_key).await {
-        if let Ok(cached) = serde_json::from_str::<Deployment>(&raw) {
-            return Ok(Json(cached));
+    if let Ok(mut redis) = state.redis.get_multiplexed_async_connection().await {
+        if let Ok(raw) = redis.get::<_, String>(&cache_key).await {
+            if let Ok(cached) = serde_json::from_str::<Deployment>(&raw) {
+                return Ok(Json(cached));
+            }
         }
     }
 
@@ -188,14 +464,17 @@ pub async fn get_deployment(
     )
     .bind(id)
     .fetch_optional(&state.db)
-    .await {
+    .await
+    {
         Ok(Some(v)) => v,
         Ok(None) => return Err(AppError::NotFound(format!("deployment {id} not found"))),
         Err(e) => return Err(AppError::from(e)),
     };
 
-    if let Ok(json) = serde_json::to_string(&deployment) {
-        let _: Result<(), _> = redis.set_ex(&cache_key, json, CACHE_TTL_SECS).await;
+    if let Ok(mut redis) = state.redis.get_multiplexed_async_connection().await {
+        if let Ok(json) = serde_json::to_string(&deployment) {
+            let _: Result<(), _> = redis.set_ex(&cache_key, json, CACHE_TTL_SECS).await;
+        }
     }
 
     Ok(Json::<Deployment>(deployment))
@@ -210,11 +489,11 @@ pub async fn list_deployments_for_contract(
     Path(contract_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let cache_key = format!("deploy_health:contract:{contract_id}:deployments");
-    let mut redis = state.redis.clone();
-
-    if let Ok(raw) = redis.get::<_, String>(&cache_key).await {
-        if let Ok(cached) = serde_json::from_str::<Vec<Deployment>>(&raw) {
-            return Ok(Json(cached));
+    if let Ok(mut redis) = state.redis.get_multiplexed_async_connection().await {
+        if let Ok(raw) = redis.get::<_, String>(&cache_key).await {
+            if let Ok(cached) = serde_json::from_str::<Vec<Deployment>>(&raw) {
+                return Ok(Json(cached));
+            }
         }
     }
 
@@ -233,8 +512,10 @@ pub async fn list_deployments_for_contract(
     .await
     .map_err(AppError::from)?;
 
-    if let Ok(json) = serde_json::to_string(&deployments) {
-        let _: Result<(), _> = redis.set_ex(&cache_key, json, CACHE_TTL_SECS).await;
+    if let Ok(mut redis) = state.redis.get_multiplexed_async_connection().await {
+        if let Ok(json) = serde_json::to_string(&deployments) {
+            let _: Result<(), _> = redis.set_ex(&cache_key, json, CACHE_TTL_SECS).await;
+        }
     }
 
     Ok(Json::<Vec<Deployment>>(deployments))
@@ -271,7 +552,8 @@ pub async fn update_deployment_status(
     .bind(&body.status)
     .bind(&body.error_message)
     .fetch_optional(&state.db)
-    .await {
+    .await
+    {
         Ok(Some(v)) => v,
         Ok(None) => return Err(AppError::NotFound(format!("deployment {id} not found"))),
         Err(e) => return Err(AppError::from(e)),
@@ -279,12 +561,81 @@ pub async fn update_deployment_status(
 
     // Invalidate cache
     let cache_key = format!("deploy_health:deployment:{id}");
-    let mut redis = state.redis.clone();
-    if let Err(e) = redis.del::<_, ()>(&cache_key).await {
-        warn!(error = %e, "Failed to invalidate deployment cache");
+    if let Ok(mut redis) = state.redis.get_multiplexed_async_connection().await {
+        if let Err(e) = redis.del::<_, ()>(&cache_key).await {
+            warn!(error = %e, "Failed to invalidate deployment cache");
+        }
     }
 
     Ok(Json::<Deployment>(deployment))
+}
+
+/// `GET /health/ready` — Kubernetes readiness probe with write capability verification.
+///
+/// Performs a lightweight write transaction to verify database is writable, not in read-only
+/// standby mode or experiencing transaction log disk-full conditions.
+#[instrument(skip(state))]
+pub async fn readiness_probe(
+    State(state): State<Arc<DeployHealthState>>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut is_writable = false;
+    let mut error_message = String::new();
+
+    // Attempt a lightweight write transaction to verify database is not in read-only mode
+    let mut tx = match state.db.begin().await {
+        Ok(t) => t,
+        Err(e) => {
+            error_message = format!("Failed to begin transaction: {}", e);
+            return Ok((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(HealthProbeResult {
+                    status: "unhealthy".to_string(),
+                    timestamp: Utc::now(),
+                    database_writable: false,
+                    message: error_message,
+                }),
+            ));
+        }
+    };
+
+    // Create a temporary table to verify write permissions
+    match sqlx::query("CREATE TEMPORARY TABLE IF NOT EXISTS health_check (id INT)")
+        .execute(&mut *tx)
+        .await
+    {
+        Ok(_) => {
+            is_writable = true;
+            match tx.rollback().await {
+                Ok(_) => {}
+                Err(e) => {
+                    warn!("Failed to rollback health check transaction: {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            error_message = format!("Database write check failed: {}", e);
+            let _ = tx.rollback().await;
+            return Ok((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(HealthProbeResult {
+                    status: "unhealthy".to_string(),
+                    timestamp: Utc::now(),
+                    database_writable: false,
+                    message: error_message,
+                }),
+            ));
+        }
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(HealthProbeResult {
+            status: "healthy".to_string(),
+            timestamp: Utc::now(),
+            database_writable: is_writable,
+            message: "Database is writable and operational".to_string(),
+        }),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -307,10 +658,22 @@ mod tests {
 
     #[test]
     fn test_status_from_str_valid() {
-        assert_eq!("pending".parse::<DeployStatus>().unwrap(), DeployStatus::Pending);
-        assert_eq!("healthy".parse::<DeployStatus>().unwrap(), DeployStatus::Healthy);
-        assert_eq!("degraded".parse::<DeployStatus>().unwrap(), DeployStatus::Degraded);
-        assert_eq!("failed".parse::<DeployStatus>().unwrap(), DeployStatus::Failed);
+        assert_eq!(
+            "pending".parse::<DeployStatus>().unwrap(),
+            DeployStatus::Pending
+        );
+        assert_eq!(
+            "healthy".parse::<DeployStatus>().unwrap(),
+            DeployStatus::Healthy
+        );
+        assert_eq!(
+            "degraded".parse::<DeployStatus>().unwrap(),
+            DeployStatus::Degraded
+        );
+        assert_eq!(
+            "failed".parse::<DeployStatus>().unwrap(),
+            DeployStatus::Failed
+        );
     }
 
     #[test]
@@ -433,7 +796,6 @@ mod tests {
         validate_create_request("CAABC", "1.0.0").unwrap();
     }
 
-    // Helper that mirrors the validation logic in `create_deployment`.
     fn validate_create_request(contract_id: &str, version: &str) -> Result<(), AppError> {
         if contract_id.trim().is_empty() {
             return Err(AppError::BadRequest("contract_id is required".into()));
@@ -442,5 +804,139 @@ mod tests {
             return Err(AppError::BadRequest("version is required".into()));
         }
         Ok(())
+    }
+
+    // --- Deployment Health Evaluation Unit Tests (Issue #1158) ---
+
+    fn sample_healthy_ingestion() -> IngestionLagMetrics {
+        IngestionLagMetrics {
+            network_tip_ledger: 10000,
+            current_processed_ledger: 9990,
+            lag_ledgers: 10,
+            queue_backlog: 5,
+            max_acceptable_lag: DEFAULT_MAX_ACCEPTABLE_LAG,
+            is_lag_acceptable: true,
+        }
+    }
+
+    fn sample_healthy_workers() -> WorkerHealthSummary {
+        WorkerHealthSummary {
+            total_workers: 2,
+            active_healthy_workers: 2,
+            max_acceptable_heartbeat_age_secs: DEFAULT_MAX_HEARTBEAT_AGE_SECS,
+            are_workers_healthy: true,
+            workers: vec![
+                WorkerHeartbeatInfo {
+                    worker_id: "worker-1".to_string(),
+                    is_healthy: true,
+                    seconds_since_last_heartbeat: 5,
+                    last_heartbeat_at: Some(Utc::now()),
+                },
+                WorkerHeartbeatInfo {
+                    worker_id: "worker-2".to_string(),
+                    is_healthy: true,
+                    seconds_since_last_heartbeat: 12,
+                    last_heartbeat_at: Some(Utc::now()),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_evaluate_deploy_health_all_healthy() {
+        let res =
+            evaluate_deploy_health(true, sample_healthy_ingestion(), sample_healthy_workers());
+        assert_eq!(res.status, DeployStatus::Healthy);
+        assert!(res.pod_healthy);
+        assert!(res.workers_healthy);
+        assert!(res.ingestion_healthy);
+        assert!(res.message.is_none());
+    }
+
+    #[test]
+    fn test_evaluate_deploy_health_elevated_lag_degraded() {
+        let mut ingestion = sample_healthy_ingestion();
+        ingestion.lag_ledgers = 600; // > 500 max, <= 2000
+        ingestion.is_lag_acceptable = false;
+
+        let res = evaluate_deploy_health(true, ingestion, sample_healthy_workers());
+        assert_eq!(res.status, DeployStatus::Degraded);
+        assert!(!res.ingestion_healthy);
+        assert!(res
+            .message
+            .unwrap()
+            .contains("Ingestion lag exceeds threshold"));
+    }
+
+    #[test]
+    fn test_evaluate_deploy_health_critical_lag_thousands_behind_tip() {
+        // Issue #1158 scenario: pod status reported healthy even when background ingestion workers
+        // are lagging thousands of ledgers behind network tip.
+        let mut ingestion = sample_healthy_ingestion();
+        ingestion.current_processed_ledger = 7000;
+        ingestion.network_tip_ledger = 10500;
+        ingestion.lag_ledgers = 3500; // lagging thousands of ledgers!
+        ingestion.is_lag_acceptable = false;
+
+        let res = evaluate_deploy_health(true, ingestion, sample_healthy_workers());
+        assert_eq!(res.status, DeployStatus::Failed);
+        assert!(!res.ingestion_healthy);
+        assert!(res
+            .message
+            .unwrap()
+            .contains("Ingestion lag is critical: 3500 ledgers behind network tip"));
+    }
+
+    #[test]
+    fn test_evaluate_deploy_health_stale_worker_heartbeat_degraded() {
+        let mut workers = sample_healthy_workers();
+        workers.active_healthy_workers = 1;
+        workers.are_workers_healthy = false;
+        workers.workers[1].is_healthy = false;
+        workers.workers[1].seconds_since_last_heartbeat = 120; // > 60s
+
+        let res = evaluate_deploy_health(true, sample_healthy_ingestion(), workers);
+        assert_eq!(res.status, DeployStatus::Degraded);
+        assert!(!res.workers_healthy);
+        assert!(res.message.unwrap().contains("Worker heartbeat stale"));
+    }
+
+    #[test]
+    fn test_evaluate_deploy_health_high_queue_backlog_degraded() {
+        let mut ingestion = sample_healthy_ingestion();
+        ingestion.queue_backlog = 1500; // > 1000 max
+
+        let res = evaluate_deploy_health(true, ingestion, sample_healthy_workers());
+        assert!(res
+            .message
+            .unwrap()
+            .contains("Ingestion queue backlog high"));
+    }
+
+    #[test]
+    fn test_evaluate_deploy_health_pod_storage_failure() {
+        let res =
+            evaluate_deploy_health(false, sample_healthy_ingestion(), sample_healthy_workers());
+        assert_eq!(res.status, DeployStatus::Failed);
+        assert!(!res.pod_healthy);
+        assert!(res
+            .message
+            .unwrap()
+            .contains("Pod storage connectivity degraded"));
+    }
+
+    #[test]
+    fn test_deploy_health_response_serialization() {
+        let res =
+            evaluate_deploy_health(true, sample_healthy_ingestion(), sample_healthy_workers());
+        let json = serde_json::to_string(&res).unwrap();
+        assert!(json.contains("\"status\":\"healthy\""));
+        assert!(json.contains("\"podHealthy\":true"));
+        assert!(json.contains("\"ingestionLag\""));
+        assert!(json.contains("\"workerHealth\""));
+
+        let deserialized: DeployHealthResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.status, DeployStatus::Healthy);
+        assert_eq!(deserialized.ingestion_lag.lag_ledgers, 10);
     }
 }

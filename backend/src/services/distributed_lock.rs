@@ -52,6 +52,10 @@ pub struct RedlockConfig {
     pub acquire_timeout: Duration,
     /// Delay between acquisition retries.
     pub retry_delay: Duration,
+    /// Clock drift adjustment factor (default 0.01 = 1% of TTL).
+    pub drift_factor: f64,
+    /// Standard round-trip network latency variance.
+    pub network_variance: Duration,
 }
 
 impl Default for RedlockConfig {
@@ -61,6 +65,8 @@ impl Default for RedlockConfig {
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
             acquire_timeout: Duration::from_secs(5),
             retry_delay: Duration::from_millis(50),
+            drift_factor: 0.01,
+            network_variance: Duration::from_millis(2),
         }
     }
 }
@@ -73,6 +79,11 @@ impl RedlockConfig {
         if self.heartbeat_interval >= self.ttl {
             return Err(LockError::InvalidConfig(
                 "heartbeat_interval must be less than ttl".into(),
+            ));
+        }
+        if self.drift_factor < 0.0 || !self.drift_factor.is_finite() {
+            return Err(LockError::InvalidConfig(
+                "drift_factor must be non-negative and finite".into(),
             ));
         }
         Ok(())
@@ -186,8 +197,9 @@ impl RedlockManager {
                 }
             }
 
-            // Factor max clock drift: (ttl * 0.01 + 2ms) per Redlock spec
-            let drift = Duration::from_millis(((ttl_ms as f64 * 0.01) + 2.0) as u64);
+            // Factor max clock drift: (ttl * drift_factor + network_variance) per Redlock spec
+            let drift = Duration::from_secs_f64(self.config.ttl.as_secs_f64() * self.config.drift_factor)
+                .saturating_add(self.config.network_variance);
             let elapsed = start_time.elapsed();
             let validity = self.config.ttl.checked_sub(elapsed + drift);
 
@@ -374,6 +386,7 @@ mod tests {
                 heartbeat_interval: ttl / 3,
                 acquire_timeout: Duration::from_millis(200),
                 retry_delay: Duration::from_millis(10),
+                ..RedlockConfig::default()
             },
         )
         .unwrap()
@@ -452,8 +465,29 @@ mod tests {
         assert!(matches!(res, Err(LockError::InvalidConfig(_))));
     }
 
+    #[test]
+    fn custom_drift_factor_and_network_variance() {
+        let config = RedlockConfig {
+            drift_factor: 0.05,
+            network_variance: Duration::from_millis(50),
+            ..RedlockConfig::default()
+        };
+        assert_eq!(config.drift_factor, 0.05);
+        assert_eq!(config.network_variance, Duration::from_millis(50));
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_drift_factor() {
+        let config = RedlockConfig {
+            drift_factor: -0.01,
+            ..RedlockConfig::default()
+        };
+        assert!(matches!(config.validate(), Err(LockError::InvalidConfig(_))));
+    }
+
     #[tokio::test]
-    async fn heartbeat_loss_cancels_running_task_token() {
+    async fn heartbeat_loss_triggers_cancellation_token() {
         let node1 = Arc::new(InMemoryRedisNode::new());
         let node2 = Arc::new(InMemoryRedisNode::new());
         let node3 = Arc::new(InMemoryRedisNode::new());
@@ -462,28 +496,32 @@ mod tests {
         let mgr = RedlockManager::new(
             nodes,
             RedlockConfig {
-                ttl: Duration::from_millis(300),
-                heartbeat_interval: Duration::from_millis(50),
+                ttl: Duration::from_millis(90),
+                heartbeat_interval: Duration::from_millis(20),
                 acquire_timeout: Duration::from_millis(200),
                 retry_delay: Duration::from_millis(10),
+                ..RedlockConfig::default()
             },
         )
         .unwrap();
 
-        let guard = mgr.acquire("task:quorum_loss").await.unwrap();
-        assert!(!guard.is_cancelled());
+        let guard = mgr.acquire("task:cancellation-test").await.unwrap();
         let cancel_token = guard.cancellation_token();
         assert!(!cancel_token.is_cancelled());
 
-        // Break quorum by deleting keys from node1 and node2 (leaving only node3, which is 1 < 2)
-        node1.compare_and_del(guard.resource(), guard.token()).await;
-        node2.compare_and_del(guard.resource(), guard.token()).await;
+        // Lose quorum by deleting the lock key from two of the three nodes.
+        let _ = node1
+            .compare_and_del("task:cancellation-test", guard.token())
+            .await;
+        let _ = node2
+            .compare_and_del("task:cancellation-test", guard.token())
+            .await;
 
-        // Wait for heartbeat tick to detect quorum loss
-        tokio::time::timeout(Duration::from_millis(500), cancel_token.cancelled())
-            .await
-            .expect("cancellation token should be cancelled on quorum loss");
+        tokio::time::sleep(Duration::from_millis(80)).await;
 
-        assert!(guard.is_cancelled());
+        assert!(
+            cancel_token.is_cancelled(),
+            "cancellation token should be cancelled when heartbeat loses quorum"
+        );
     }
 }

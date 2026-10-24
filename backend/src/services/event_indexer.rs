@@ -43,14 +43,16 @@ impl EventIndexer {
         Self { db }
     }
 
-    /// Ingest a batch of raw events from the Stellar network.
+    /// Insert a batch of raw events in an atomic database transaction.
     #[instrument(skip(self, events), fields(count = events.len()))]
-    pub async fn ingest(&self, events: Vec<RawEvent>) -> Result<usize, sqlx::Error> {
+    pub async fn insert_batch(&self, events: &[RawEvent]) -> Result<usize, sqlx::Error> {
         if events.is_empty() {
             return Ok(0);
         }
 
+        let mut tx = self.db.begin().await?;
         let mut inserted = 0;
+
         for event in events {
             let result = sqlx::query(
                 r#"
@@ -69,7 +71,7 @@ impl EventIndexer {
             .bind(&event.topics)
             .bind(&event.data)
             .bind(Utc::now())
-            .execute(&self.db)
+            .execute(&mut *tx)
             .await?;
 
             if result.rows_affected() > 0 {
@@ -78,8 +80,59 @@ impl EventIndexer {
             }
         }
 
-        info!(inserted, "Event ingestion complete");
+        tx.commit().await?;
+        info!(inserted, "Event batch insertion complete");
         Ok(inserted)
+    }
+
+    /// Ingest a batch of raw events from the Stellar network.
+    #[instrument(skip(self, events), fields(count = events.len()))]
+    pub async fn ingest(&self, events: Vec<RawEvent>) -> Result<usize, sqlx::Error> {
+        self.insert_batch(&events).await
+    }
+
+    /// Catch-up synchronization of historical contract events streaming through
+    /// a bounded channel and flushing database inserts in fixed-size chunks (e.g. 500 events).
+    /// Prevents unbounded memory buffering and OOM panics when syncing large ledger spans.
+    #[instrument(skip(self, event_rx))]
+    pub async fn sync_historical_events(
+        &self,
+        mut event_rx: tokio::sync::mpsc::Receiver<RawEvent>,
+        chunk_size: usize,
+    ) -> Result<usize, sqlx::Error> {
+        let effective_chunk_size = if chunk_size == 0 {
+            HISTORICAL_SYNC_CHUNK_SIZE
+        } else {
+            chunk_size
+        };
+
+        let mut chunk = Vec::with_capacity(effective_chunk_size);
+        let mut total_inserted = 0;
+
+        while let Some(event) = event_rx.recv().await {
+            chunk.push(event);
+            if chunk.len() >= effective_chunk_size {
+                total_inserted += self.insert_batch(&chunk).await?;
+                chunk.clear();
+            }
+        }
+
+        if !chunk.is_empty() {
+            total_inserted += self.insert_batch(&chunk).await?;
+        }
+
+        info!(total_inserted, "Historical catch-up sync completed");
+        Ok(total_inserted)
+    }
+
+    /// Catch-up synchronization using default bounded chunk size (500 events).
+    #[instrument(skip(self, event_rx))]
+    pub async fn catch_up_historical_events(
+        &self,
+        event_rx: tokio::sync::mpsc::Receiver<RawEvent>,
+    ) -> Result<usize, sqlx::Error> {
+        self.sync_historical_events(event_rx, HISTORICAL_SYNC_CHUNK_SIZE)
+            .await
     }
 
     /// Query indexed events with optional filters.
@@ -138,6 +191,238 @@ impl EventIndexer {
         }
         Ok(deleted)
     }
+
+    /// Reconciles a potential blockchain reorganization when receiving an incoming ledger header.
+    /// If the incoming ledger's parent hash does not match the recorded previous block hash,
+    /// a reorganization is detected, the common ancestor is located, and orphaned events
+    /// are purged in a single atomic database transaction.
+    #[instrument(skip(self))]
+    pub async fn reconcile_reorg(
+        &self,
+        new_ledger: &LedgerBlockHeader,
+        ancestor_candidates: Option<&[LedgerBlockHeader]>,
+    ) -> Result<Option<ReorgReconciliation>, sqlx::Error> {
+        let latest = self.latest_ledger_header().await?;
+        let Some(prev) = latest else {
+            self.record_ledger_header(new_ledger).await?;
+            return Ok(None);
+        };
+
+        // Continuity check: contiguous chain requires new sequence == prev + 1 and new parent_hash == prev block_hash
+        let is_contiguous =
+            new_ledger.sequence == prev.sequence + 1 && new_ledger.parent_hash == prev.block_hash;
+
+        if is_contiguous {
+            self.record_ledger_header(new_ledger).await?;
+            return Ok(None);
+        }
+
+        warn!(
+            prev_seq = prev.sequence,
+            prev_hash = %prev.block_hash,
+            new_seq = new_ledger.sequence,
+            new_parent_hash = %new_ledger.parent_hash,
+            "Blockchain reorganization detected: parent hash mismatch"
+        );
+
+        let common_ancestor = self
+            .locate_common_ancestor(&prev, new_ledger, ancestor_candidates)
+            .await?;
+
+        // Atomically rollback orphaned events and headers beyond common ancestor
+        let mut tx = self.db.begin().await?;
+
+        let purge_result = sqlx::query("DELETE FROM contract_events WHERE ledger_sequence > $1")
+            .bind(common_ancestor)
+            .execute(&mut *tx)
+            .await?;
+        let purged_events_count = purge_result.rows_affected();
+
+        let _ = sqlx::query("DELETE FROM indexed_ledger_headers WHERE sequence > $1")
+            .bind(common_ancestor)
+            .execute(&mut *tx)
+            .await;
+
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO indexed_ledger_headers (sequence, block_hash, parent_hash, created_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (sequence) DO UPDATE
+            SET block_hash = EXCLUDED.block_hash,
+                parent_hash = EXCLUDED.parent_hash,
+                created_at = NOW()
+            "#,
+        )
+        .bind(new_ledger.sequence)
+        .bind(&new_ledger.block_hash)
+        .bind(&new_ledger.parent_hash)
+        .execute(&mut *tx)
+        .await;
+
+        tx.commit().await?;
+
+        info!(
+            common_ancestor,
+            orphaned_from = common_ancestor + 1,
+            purged_events_count,
+            "Reorganization reconciliation completed"
+        );
+
+        Ok(Some(ReorgReconciliation {
+            reorg_detected: true,
+            orphaned_from_ledger: common_ancestor + 1,
+            common_ancestor_ledger: common_ancestor,
+            purged_events_count,
+        }))
+    }
+
+    /// Rollback orphaned event records above common_ancestor_sequence in an atomic database transaction.
+    #[instrument(skip(self))]
+    pub async fn rollback_orphaned_events(
+        &self,
+        common_ancestor_sequence: i64,
+    ) -> Result<u64, sqlx::Error> {
+        let mut tx = self.db.begin().await?;
+
+        let result = sqlx::query("DELETE FROM contract_events WHERE ledger_sequence > $1")
+            .bind(common_ancestor_sequence)
+            .execute(&mut *tx)
+            .await?;
+        let deleted = result.rows_affected();
+
+        let _ = sqlx::query("DELETE FROM indexed_ledger_headers WHERE sequence > $1")
+            .bind(common_ancestor_sequence)
+            .execute(&mut *tx)
+            .await;
+
+        tx.commit().await?;
+
+        if deleted > 0 {
+            warn!(
+                deleted,
+                common_ancestor_sequence, "Rolled back orphaned contract events"
+            );
+        }
+        Ok(deleted)
+    }
+
+    /// Locates the common ancestor ledger sequence between the indexed history and incoming chain.
+    pub async fn locate_common_ancestor(
+        &self,
+        prev: &LedgerBlockHeader,
+        new_ledger: &LedgerBlockHeader,
+        ancestor_candidates: Option<&[LedgerBlockHeader]>,
+    ) -> Result<i64, sqlx::Error> {
+        // Direct parent match in indexed headers
+        let parent_match: Option<(i64,)> =
+            sqlx::query_as("SELECT sequence FROM indexed_ledger_headers WHERE block_hash = $1")
+                .bind(&new_ledger.parent_hash)
+                .fetch_optional(&self.db)
+                .await
+                .unwrap_or(None);
+
+        if let Some((seq,)) = parent_match {
+            return Ok(seq);
+        }
+
+        // Search through candidate headers from incoming branch
+        if let Some(candidates) = ancestor_candidates {
+            for candidate in candidates.iter().rev() {
+                let match_exists: Option<(i64,)> = sqlx::query_as(
+                    "SELECT sequence FROM indexed_ledger_headers WHERE sequence = $1 AND block_hash = $2",
+                )
+                .bind(candidate.sequence)
+                .bind(&candidate.block_hash)
+                .fetch_optional(&self.db)
+                .await
+                .unwrap_or(None);
+
+                if let Some((seq,)) = match_exists {
+                    return Ok(seq);
+                }
+            }
+        }
+
+        // Conservative fallback: rollback boundary at least before new ledger or previous sequence
+        Ok((new_ledger.sequence - 1).min(prev.sequence).max(0))
+    }
+
+    /// Fetches the latest indexed ledger header.
+    pub async fn latest_ledger_header(&self) -> Result<Option<LedgerBlockHeader>, sqlx::Error> {
+        let row = sqlx::query_as::<_, LedgerBlockHeader>(
+            "SELECT sequence, block_hash, parent_hash FROM indexed_ledger_headers ORDER BY sequence DESC LIMIT 1",
+        )
+        .fetch_optional(&self.db)
+        .await;
+
+        match row {
+            Ok(header) => Ok(header),
+            Err(_) => {
+                let _ = self.ensure_header_table().await;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Records or updates a ledger header.
+    pub async fn record_ledger_header(
+        &self,
+        header: &LedgerBlockHeader,
+    ) -> Result<(), sqlx::Error> {
+        let _ = self.ensure_header_table().await;
+        sqlx::query(
+            r#"
+            INSERT INTO indexed_ledger_headers (sequence, block_hash, parent_hash, created_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (sequence) DO UPDATE
+            SET block_hash = EXCLUDED.block_hash,
+                parent_hash = EXCLUDED.parent_hash,
+                created_at = NOW()
+            "#,
+        )
+        .bind(header.sequence)
+        .bind(&header.block_hash)
+        .bind(&header.parent_hash)
+        .execute(&self.db)
+        .await?;
+        Ok(())
+    }
+
+    /// Ensure the ledger headers table exists.
+    async fn ensure_header_table(&self) -> Result<(), sqlx::Error> {
+        let _ = sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS indexed_ledger_headers (
+                sequence BIGINT PRIMARY KEY,
+                block_hash TEXT NOT NULL,
+                parent_hash TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_indexed_ledger_headers_hash
+                ON indexed_ledger_headers (block_hash);
+            "#,
+        )
+        .execute(&self.db)
+        .await;
+        Ok(())
+    }
+}
+
+/// Ledger block header used to track continuity and detect chain reorganizations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, sqlx::FromRow)]
+pub struct LedgerBlockHeader {
+    pub sequence: i64,
+    pub block_hash: String,
+    pub parent_hash: String,
+}
+
+/// Result of reorganization detection and reconciliation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReorgReconciliation {
+    pub reorg_detected: bool,
+    pub orphaned_from_ledger: i64,
+    pub common_ancestor_ledger: i64,
+    pub purged_events_count: u64,
 }
 
 /// A raw event as received from the Stellar network / horizon.
@@ -150,6 +435,19 @@ pub struct RawEvent {
     pub event_type: String,
     pub topics: serde_json::Value,
     pub data: serde_json::Value,
+}
+
+pub const HISTORICAL_SYNC_CHUNK_SIZE: usize = 500;
+pub const HISTORICAL_CHANNEL_BOUND: usize = 500;
+
+/// Create a bounded channel for streaming historical events with backpressure.
+pub fn create_historical_event_channel(
+    bound: usize,
+) -> (
+    tokio::sync::mpsc::Sender<RawEvent>,
+    tokio::sync::mpsc::Receiver<RawEvent>,
+) {
+    tokio::sync::mpsc::channel(bound)
 }
 
 #[cfg(test)]
@@ -198,5 +496,58 @@ mod tests {
         assert_eq!(back.contract_id, "CABC");
         assert_eq!(back.ledger_sequence, 100);
         assert_eq!(back.event_index, 0);
+    }
+
+    #[tokio::test]
+    async fn test_historical_event_channel_backpressure() {
+        let (tx, mut rx) = create_historical_event_channel(2);
+        let ev1 = make_event("C1", 10, "tx1", "transfer");
+        let ev2 = make_event("C2", 11, "tx2", "mint");
+
+        tx.send(ev1).await.unwrap();
+        tx.send(ev2).await.unwrap();
+
+        let received1 = rx.recv().await.unwrap();
+        assert_eq!(received1.contract_id, "C1");
+        let received2 = rx.recv().await.unwrap();
+        assert_eq!(received2.contract_id, "C2");
+    }
+
+    #[tokio::test]
+    async fn test_sync_historical_events_empty_channel() {
+        let indexer = EventIndexer::new(lazy_pool());
+        let (tx, rx) = create_historical_event_channel(HISTORICAL_CHANNEL_BOUND);
+        drop(tx);
+
+        let result = indexer.catch_up_historical_events(rx).await.unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_ledger_block_header_serialization() {
+        let header = LedgerBlockHeader {
+            sequence: 500,
+            block_hash: "hash_500".to_string(),
+            parent_hash: "hash_499".to_string(),
+        };
+        let json = serde_json::to_string(&header).unwrap();
+        let back: LedgerBlockHeader = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.sequence, 500);
+        assert_eq!(back.block_hash, "hash_500");
+        assert_eq!(back.parent_hash, "hash_499");
+    }
+
+    #[test]
+    fn test_reorg_reconciliation_result() {
+        let rec = ReorgReconciliation {
+            reorg_detected: true,
+            orphaned_from_ledger: 105,
+            common_ancestor_ledger: 104,
+            purged_events_count: 12,
+        };
+        assert!(rec.reorg_detected);
+        assert_eq!(rec.orphaned_from_ledger, 105);
+        assert_eq!(rec.common_ancestor_ledger, 104);
+        assert_eq!(rec.purged_events_count, 12);
     }
 }
